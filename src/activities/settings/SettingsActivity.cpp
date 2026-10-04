@@ -20,11 +20,15 @@
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
 #include "HomeButtonSettingsActivity.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSettingsActivity.h"
+#endif
 #include "KeyboardLayoutsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "OpdsServerListActivity.h"
+#endif
 #include "OtaUpdateActivity.h"
 #include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
@@ -34,6 +38,7 @@
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/plugins/PluginCatalogActivity.h"
+#include "activities/readwise/ReadwiseSettingsActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -55,12 +60,18 @@ void SettingsActivity::rebuildSettingsLists() {
   // reader activity ran — otherwise the font-family picker shows stale list.
   sdFontSystem.refreshIfDirty();
 
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Dictionary support is compiled out; getSettingsList() null-guards.
+  const std::vector<DictionaryEntry>* dictionariesArg = nullptr;
+#else
   // Rescan /dictionaries on every rebuild: cheap (one directory listing) and
   // picks up dictionaries copied to the SD card since the last visit.
   std::vector<DictionaryEntry> dictionaries;
   DictionaryRegistry::discover(dictionaries);
+  const std::vector<DictionaryEntry>* dictionariesArg = &dictionaries;
+#endif
 
-  for (const auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaries)) {
+  for (const auto& setting : getSettingsList(&sdFontSystem.registry(), dictionariesArg)) {
     if (setting.category == StrId::STR_NONE_OPT || home_button::isSetting(setting.valuePtr)) continue;
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       // The sunlight fading fix is a grayscale-waveform compensation that does
@@ -102,9 +113,16 @@ void SettingsActivity::rebuildSettingsLists() {
   if (halClock.isAvailable()) {
     systemSettings.push_back(SettingInfo::Action(StrId::STR_CLOCK, SettingAction::ClockSettings));
   }
+#ifndef CROSSPOINT_READWISE_ONLY
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
+#endif
+  systemSettings.push_back(SettingInfo::Action(StrId::STR_READWISE, SettingAction::Readwise));
+#ifndef CROSSPOINT_READWISE_ONLY
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
+#endif
   systemSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
+  systemSettings.push_back(
+      SettingInfo::Action(StrId::STR_CLEAR_READWISE_ARTICLES, SettingAction::ClearReadwiseArticles));
   // OTA fetches this board's own release asset (see OtaUpdater); boards whose
   // asset isn't published yet just report no update available.
   systemSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
@@ -368,12 +386,19 @@ void SettingsActivity::toggleCurrentSetting() {
           LOG_ERR("SETTINGS", "OOM: ClockSettingsActivity");
         }
         break;
+#ifndef CROSSPOINT_READWISE_ONLY
       case SettingAction::KOReaderSync:
         startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
+#endif
+      case SettingAction::Readwise:
+        startActivityForResult(std::make_unique<ReadwiseSettingsActivity>(renderer, mappedInput), resultHandler);
+        break;
+#ifndef CROSSPOINT_READWISE_ONLY
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
         break;
+#endif
       case SettingAction::Network: {
         auto activity = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput, false);
         if (!activity) {
@@ -398,6 +423,11 @@ void SettingsActivity::toggleCurrentSetting() {
       }
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::ClearReadwiseArticles:
+        startActivityForResult(
+            std::make_unique<ClearCacheActivity>(renderer, mappedInput, ClearCacheActivity::Mode::ReadwiseArticles),
+            resultHandler);
         break;
       case SettingAction::CheckForUpdates:
         startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
@@ -447,6 +477,11 @@ void SettingsActivity::toggleCurrentSetting() {
           LOG_ERR("SETTINGS", "OOM: AboutActivity");
         }
         break;
+#ifdef CROSSPOINT_READWISE_ONLY
+      case SettingAction::KOReaderSync:
+      case SettingAction::OPDSBrowser:
+        break;
+#endif
       case SettingAction::None:
         // Do nothing
         break;

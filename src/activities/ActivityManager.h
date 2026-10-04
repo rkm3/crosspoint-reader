@@ -17,7 +17,7 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, READWISE, FILE_TRANSFER, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -66,6 +66,9 @@ class ActivityManager {
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
 
+  // Set by activities after long blocking work; cleared when the main loop reads it.
+  std::atomic<bool> blockingWorkFinished{false};
+
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
       : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
@@ -89,6 +92,7 @@ class ActivityManager {
   void goToLibrary();
   void goToBrowser();
   void goToPlugins(bool showOpds);
+  void goToReadwiseLibrary();
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
@@ -102,6 +106,13 @@ class ActivityManager {
   // Remove the currentActivity, returning the last one on stack
   // Note: if popActivity() on last activity on the stack, we will goHome()
   void popActivity();
+
+  // Long blocking work (a network download) freezes the main loop, so the
+  // auto-sleep timer keeps counting wall-clock time the user was never idle
+  // for and fires the moment control returns. Activities call this when such
+  // work finishes so the timeout restarts from now instead.
+  void noteBlockingWorkFinished() { blockingWorkFinished.store(true, std::memory_order_relaxed); }
+  bool consumeBlockingWorkFinished() { return blockingWorkFinished.exchange(false, std::memory_order_relaxed); }
 
   bool preventAutoSleep() const;
   bool requiresExclusiveStorageLoop() const;

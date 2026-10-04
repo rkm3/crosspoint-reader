@@ -8,6 +8,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <ReleaseJsonParser.h>
+#include <ReleaseVersion.h>
 #include <esp_ota_ops.h>
 // clang-format on
 
@@ -17,10 +18,7 @@
 
 #include "FirmwareBoardTag.h"
 #include "FirmwareFlasher.h"
-
-namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/crosspoint-reader/crosspoint-reader/releases/latest";
-}  // namespace
+#include "ForkConfig.h"
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   LOG_DBG("OTA", "Checking for update (current: %s)", CROSSPOINT_VERSION);
@@ -40,15 +38,20 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   releaseParser.setFirmwareAssetName("");
   // Each board updates from crosspoint-<version>-<device>.bin. The combined
   // C3 image uses x3-x4; other asset suffixes match their firmware board tag.
+  // The Readwise variant overrides the device so it installs its own asset.
+  char assetSuffix[24] = "-x3-x4";
+#ifdef OTA_ASSET_DEVICE
+  snprintf(assetSuffix, sizeof(assetSuffix), "-%s", OTA_ASSET_DEVICE);
+#else
   const bool isX4 = board_tag::boardNameLen() == 2 && memcmp(board_tag::boardName(), "x4", 2) == 0;
-  char assetSuffix[20] = "-x3-x4";
   if (!isX4) {
     snprintf(assetSuffix, sizeof(assetSuffix), "-%.*s", static_cast<int>(board_tag::boardNameLen()),
              board_tag::boardName());
   }
+#endif
   char assetName[48] = {};
   bool assetNameSet = false;
-  const bool ok = HttpDownloader::fetchUrl(latestReleaseUrl, [&](const uint8_t* data, size_t len) {
+  const bool ok = HttpDownloader::fetchUrl(ForkConfig::OTA_LATEST_RELEASE_URL, [&](const uint8_t* data, size_t len) {
     size_t offset = 0;
     while (!assetNameSet && offset < len) {
       releaseParser.feed(reinterpret_cast<const char*>(data + offset), 1);
@@ -96,42 +99,10 @@ bool OtaUpdater::isUpdateNewer() const {
     return false;
   }
 
-  int currentMajor, currentMinor, currentPatch;
-  int latestMajor, latestMinor, latestPatch;
-
-  const auto currentVersion = CROSSPOINT_VERSION;
-
-  // semantic version check (only match on 3 segments)
-  sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch);
-  sscanf(currentVersion, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch);
-
-  /*
-   * Compare major versions.
-   * If they differ, return true if latest major version greater than current major version
-   * otherwise return false.
-   */
-  if (latestMajor != currentMajor) return latestMajor > currentMajor;
-
-  /*
-   * Compare minor versions.
-   * If they differ, return true if latest minor version greater than current minor version
-   * otherwise return false.
-   */
-  if (latestMinor != currentMinor) return latestMinor > currentMinor;
-
-  /*
-   * Check patch versions.
-   */
-  if (latestPatch != currentPatch) return latestPatch > currentPatch;
-
-  // If we reach here, it means all segments are equal.
-  // One final check, if we're on an RC build (contains "-rc"), we should consider the latest version as newer even if
-  // the segments are equal, since RC builds are pre-release versions.
-  if (strstr(currentVersion, "-rc") != nullptr) {
-    return true;
-  }
-
-  return false;
+  // Semver compare, including prerelease ordering. Build metadata (the
+  // Readwise variant's "+readwise") does not make a build look older than the
+  // release it was cut from.
+  return ReleaseVersion::isNewer(latestVersion, CROSSPOINT_VERSION);
 }
 
 const std::string& OtaUpdater::getLatestVersion() const { return latestVersion; }

@@ -29,17 +29,27 @@ target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
 )
-target_compile_options(crosspoint_test_common INTERFACE
-  -Wall
-  -Wextra
-  -pedantic
-)
+if(MSVC)
+  # MSVC rejects the GCC-style flags outright (error D8021), which makes the
+  # whole suite unbuildable on Windows. /W4 is the closest equivalent.
+  target_compile_options(crosspoint_test_common INTERFACE
+    /W4
+    /utf-8
+  )
+else()
+  target_compile_options(crosspoint_test_common INTERFACE
+    -Wall
+    -Wextra
+    -pedantic
+  )
+endif()
 
 enable_testing()
 include(GoogleTest)
 
 add_subdirectory(streaming_json_parser)
 add_subdirectory(release_json_parser)
+add_subdirectory(release_version)
 add_subdirectory(differential_rounding)
 add_subdirectory(hyphenation_eval)
 add_subdirectory(utf8_compose)
@@ -51,6 +61,9 @@ add_subdirectory(library_index_file)
 add_subdirectory(library_builder)
 add_subdirectory(minibidi_arabic)
 add_subdirectory(combining_marks)
+add_subdirectory(readwise_contract)
+add_subdirectory(readwise_storage)
+add_subdirectory(readwise_client)
 add_subdirectory(credential_integrity)
 add_subdirectory(xml_parser_utils)
 add_subdirectory(token_boundary)

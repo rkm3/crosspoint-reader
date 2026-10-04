@@ -12,21 +12,24 @@
 
 #include "CrossPointSettings.h"
 #include "HapticFeedback.h"
-#include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
-#include "browser/OpdsBookBrowserActivity.h"
 #include "components/HeaderBackTapTarget.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
-#include "home/HomeActivity.h"
 #include "library/LibraryListActivity.h"
-#include "network/CrossPointWebServerActivity.h"
 #include "network/UsbDriveActivity.h"
 #include "plugins/PluginCatalogActivity.h"
 #include "reader/ReaderActivity.h"
-#include "settings/OpdsServerListActivity.h"
+#include "readwise/ReadwiseLibraryActivity.h"
 #include "settings/SettingsActivity.h"
+#ifndef CROSSPOINT_READWISE_ONLY
+#include "OpdsServerStore.h"
+#include "browser/OpdsBookBrowserActivity.h"
+#include "home/HomeActivity.h"
+#include "network/CrossPointWebServerActivity.h"
+#include "settings/OpdsServerListActivity.h"
+#endif
 #include "util/BmpViewerActivity.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
@@ -248,6 +251,13 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   }
 }
 
+#ifdef CROSSPOINT_READWISE_ONLY
+// Readwise-only build: these destinations are compiled out, so any surviving
+// call site dead-ends at the Readwise library (the variant's home screen).
+void ActivityManager::goToFileTransfer() { goHome(); }
+
+void ActivityManager::goToJoinNetwork() { goHome(); }
+#else
 void ActivityManager::goToFileTransfer() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
 }
@@ -257,6 +267,7 @@ void ActivityManager::goToJoinNetwork() {
   // Network mode (skips mode selection, does not reboot again).
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput, /*startInJoinNetwork=*/true));
 }
+#endif
 
 void ActivityManager::goToUsbDrive() {
 #if FREEINK_CAP_USB_MSC
@@ -274,7 +285,14 @@ void ActivityManager::goToUsbDrive() {
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToFileBrowser(std::string path) {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // FileBrowserActivity stays linked for SD firmware recovery, but general
+  // browsing is not a destination in this variant.
+  (void)path;
+  goHome();
+#else
   replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));
+#endif
 }
 
 void ActivityManager::goToLibrary() {
@@ -287,6 +305,9 @@ void ActivityManager::goToLibrary() {
 }
 
 void ActivityManager::goToBrowser() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  goHome();
+#else
   const auto& servers = OPDS_STORE.getServers();
   // Skip the server picker when there's only one server configured
   if (servers.size() == 1) {
@@ -294,10 +315,15 @@ void ActivityManager::goToBrowser() {
   } else {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
+#endif
 }
 
 void ActivityManager::goToPlugins(bool showOpds) {
   replaceActivity(std::make_unique<PluginCatalogActivity>(renderer, mappedInput, showOpds, /*rootMode=*/true));
+}
+
+void ActivityManager::goToReadwiseLibrary() {
+  replaceActivity(std::make_unique<ReadwiseLibraryActivity>(renderer, mappedInput));
 }
 
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
@@ -334,6 +360,12 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
 }
 
 void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefresh) {
+#ifdef CROSSPOINT_READWISE_ONLY
+  // Readwise-only build: the Readwise library is the home screen.
+  (void)initialMenuItem;
+  (void)cleanInitialRefresh;
+  replaceActivity(std::make_unique<ReadwiseLibraryActivity>(renderer, mappedInput));
+#else
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
     if (activityName == "FileBrowser") {
@@ -342,6 +374,8 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::LIBRARY;
     } else if (activityName == "OpdsBookBrowser" || activityName == "PluginCatalog") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
+    } else if (activityName == "ReadwiseLibrary") {
+      initialMenuItem = HomeMenuItem::READWISE;
     } else if (activityName == "CrossPointWebServer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "Settings") {
@@ -349,6 +383,7 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
     }
   }
   replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem, cleanInitialRefresh));
+#endif
 }
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 

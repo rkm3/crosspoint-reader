@@ -25,14 +25,18 @@
 #include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "DictionaryWordSelectActivity.h"
+#endif
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnoteSelectActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "KOReaderSyncActivity.h"
+#endif
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
@@ -44,6 +48,7 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/readwise/ReadwiseSupport.h"
 #include "activities/settings/TextSettingsActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -194,7 +199,11 @@ EpubReaderActivity::~EpubReaderActivity() {
 }
 
 bool EpubReaderActivity::loadBook() {
-  auto loadedEpub = makeUniqueNoThrow<Epub>(bookPath, "/.crosspoint");
+  // A managed article keeps its cache beside the archive, so deleting the
+  // article directory removes the sections and extracted images with it.
+  const std::string articleDir = ReadwiseUi::articleDirForBodyPath(bookPath);
+  const std::string cacheRoot = articleDir.empty() ? std::string("/.crosspoint") : articleDir;
+  auto loadedEpub = makeUniqueNoThrow<Epub>(bookPath, cacheRoot);
   if (!loadedEpub) {
     LOG_ERR("ERS", "Failed to allocate EPUB object");
     return false;
@@ -302,9 +311,11 @@ void EpubReaderActivity::openReaderMenu() {
   const int bookProgressPercent = bookPercentFor(position);
 
   startActivityForResult(
-      std::make_unique<EpubReaderMenuActivity>(renderer, mappedInput, epub->getTitle(), position.displayPage(),
-                                               position.totalPages, bookProgressPercent, SETTINGS.orientation,
-                                               !currentPageFootnotes.empty(), !cachedBookmarks.empty()),
+      std::make_unique<EpubReaderMenuActivity>(
+          renderer, mappedInput,
+          ReadwiseUi::isBodyPath(bookPath) ? ReadwiseUi::titleForBodyPath(bookPath) : epub->getTitle(),
+          position.displayPage(), position.totalPages, bookProgressPercent, SETTINGS.orientation,
+          !currentPageFootnotes.empty(), !cachedBookmarks.empty()),
       [this](const ActivityResult& result) {
         const auto& menu = std::get<MenuResult>(result.data);
 
@@ -335,6 +346,9 @@ void EpubReaderActivity::showBuildPopup(GfxRenderer& renderer, int& pagesUntilFu
 }
 
 void EpubReaderActivity::openDictionaryWordSelect() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  return;
+#else
   if (SETTINGS.dictionaryName[0] == '\0') {
     showDictionaryMessage = true;
     dictionaryMessageTime = millis();
@@ -354,6 +368,7 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
                                                                         orientedMarginLeft, orientedMarginTop),
                          [this](const ActivityResult&) { requestUpdate(); });
+#endif
 }
 
 void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
@@ -478,7 +493,7 @@ void EpubReaderActivity::loop() {
   const bool atEndOfBook = currentSpineIndex > 0 && currentSpineIndex >= epub->getSpineItemsCount();
   clearEndOfBookOptionsIfNeeded();
 
-  if (SETTINGS.removeReadBooksFromRecents) {
+  if (SETTINGS.removeReadBooksFromRecents && !ReadwiseUi::isBodyPath(bookPath)) {
     if (atEndOfBook && !recentsEntryRemoved) {
       recentsEntryRemoved = RECENT_BOOKS.removeByPath(epub->getPath());
     } else if (!atEndOfBook && recentsEntryRemoved) {
@@ -488,7 +503,10 @@ void EpubReaderActivity::loop() {
   }
 
   if (atEndOfBook) {
-    pendingReadFolderMove = SETTINGS.moveFinishedToReadFolder && !isInReadFolder(epub->getPath());
+    // Never relocate a managed article: it is not in the book collection, and
+    // moving it would orphan the archive and the cache built beside it.
+    pendingReadFolderMove =
+        SETTINGS.moveFinishedToReadFolder && !ReadwiseUi::isBodyPath(bookPath) && !isInReadFolder(epub->getPath());
   } else {
     pendingReadFolderMove = false;
   }
@@ -1007,6 +1025,9 @@ unsigned long EpubReaderActivity::confirmLongPressThreshold() const {
 }
 
 bool EpubReaderActivity::launchKOReaderSync() {
+#ifdef CROSSPOINT_READWISE_ONLY
+  return false;
+#else
   if (!KOREADER_STORE.hasCredentials()) return false;
 
   RenderLock renderLock;
@@ -1053,6 +1074,7 @@ bool EpubReaderActivity::launchKOReaderSync() {
   activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
       renderer, mappedInput, savedEpubPath, localPos, std::move(localKoPos), std::move(localChapterName)));
   return true;
+#endif
 }
 
 void EpubReaderActivity::applyInitialOrientation() {

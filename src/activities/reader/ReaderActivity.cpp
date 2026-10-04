@@ -17,7 +17,10 @@
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#ifndef CROSSPOINT_READWISE_ONLY
 #include "XtcReaderActivity.h"
+#endif
+#include "activities/readwise/ReadwiseSupport.h"
 #include "util/PluginEvents.h"
 
 ReaderActivity::ReaderActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -33,9 +36,12 @@ std::unique_ptr<ReaderActivity> ReaderActivity::create(GfxRenderer& renderer, Ma
                                                        std::string path, const bool allowFastInitialRefresh) {
   // ActivityManager requires heap ownership; each branch allocates exactly one screen-lifetime object.
   std::unique_ptr<ReaderActivity> activity;
+#ifndef CROSSPOINT_READWISE_ONLY
   if (FsHelpers::hasXtcExtension(path)) {
     activity = makeUniqueNoThrow<XtcReaderActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh);
-  } else {
+  } else
+#endif
+  {
     activity = makeUniqueNoThrow<EpubReaderActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh);
   }
 
@@ -89,7 +95,11 @@ void ReaderActivity::rememberBookOnceRendered() {
   bookRemembered = true;
   APP_STATE.openEpubPath = bookPath;
   APP_STATE.saveToFile();
-  RECENT_BOOKS.addBook(bookPath, getBookTitle(), getBookAuthor(), getBookThumbBmpPath());
+  // A Readwise article's filename is an opaque id. It belongs to that library,
+  // not the recents list.
+  if (!ReadwiseUi::isBodyPath(bookPath)) {
+    RECENT_BOOKS.addBook(bookPath, getBookTitle(), getBookAuthor(), getBookThumbBmpPath());
+  }
   const pluginevents::Var openVars[] = {{"book", bookPath.c_str()}};
   pluginevents::emit(pluginevents::Event::ReaderOpen, openVars, 1);
 }
@@ -157,6 +167,12 @@ void ReaderActivity::flushReaderSession() {
 }
 
 bool ReaderActivity::handleBackNavigation() {
+  if (ReadwiseUi::isBodyPath(bookPath) && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    // The article was opened from the Readwise library. The file-browser
+    // fallback would leave the user in the bodies cache.
+    activityManager.goToReadwiseLibrary();
+    return true;
+  }
   return ReaderUtils::handleBackNavigation(mappedInput, activityManager, bookPath.c_str(),
                                            {this, [](void* ctx) { static_cast<ReaderActivity*>(ctx)->onGoHome(); }});
 }

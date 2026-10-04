@@ -21,6 +21,10 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint8_t recentOverlaySleepPos = 0;
   uint8_t recentOverlaySleepFill = 0;
   uint8_t readerActivityLoadCount = 0;
+  // Which Readwise library view (Later/Shortlist/Feed) was last browsed, so
+  // Back out of an article returns to the view it was opened from. Persisted
+  // because opening an uncached article restarts the device.
+  uint8_t readwiseLocationIndex = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
 

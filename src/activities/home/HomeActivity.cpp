@@ -22,6 +22,7 @@
 #include "HapticFeedback.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "ReadwiseCredentialStore.h"
 #include "RecentBooksStore.h"
 #include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "components/UITheme.h"
@@ -33,6 +34,9 @@ int HomeActivity::getMenuItemCount() const {
     count += recentBooks.size();
   }
   if (hasLibrarySlot()) {
+    count++;
+  }
+  if (hasReadwise) {
     count++;
   }
   return count;
@@ -232,6 +236,7 @@ void HomeActivity::onEnter() {
 
   hasOpdsServers = OPDS_STORE.hasServers();
   hasPlugins = anyPluginInstalled();
+  hasReadwise = READWISE_STORE.isSyncEnabled();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   if (UITheme::getInstance().hasCoverGridHome()) {
@@ -248,7 +253,9 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasLibrarySlot());
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE
+                      ? 0
+                      : base + menuItemToIndex(initialMenuItem, hasLibrarySlot(), hasReadwise);
 
   // Trigger first update
   requestUpdate();
@@ -309,7 +316,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasLibrarySlot())) {
+    switch (indexToMenuItem(menuIndex, hasLibrarySlot(), hasReadwise)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -318,6 +325,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuItem::OPDS_BROWSER:  // the library slot
         hasPlugins ? onPluginsOpen() : onOpdsBrowserOpen();
+        break;
+      case HomeMenuItem::READWISE:
+        onReadwiseOpen();
         break;
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
@@ -523,6 +533,13 @@ void HomeActivity::render(RenderLock&&) {
     menuIcons.insert(menuIcons.begin() + 2, Plugins);
   }
 
+  if (hasReadwise) {
+    // After the plugins/OPDS slot when that slot is present, before File Transfer.
+    const int readwisePos = hasLibrarySlot() ? 3 : 2;
+    menuItems.insert(menuItems.begin() + readwisePos, tr(STR_READWISE));
+    menuIcons.insert(menuIcons.begin() + readwisePos, Library);
+  }
+
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     // Insert Continue Reading at the top if enabled in theme
     menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
@@ -568,3 +585,5 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(hasOpdsServers); }
+
+void HomeActivity::onReadwiseOpen() { activityManager.goToReadwiseLibrary(); }
