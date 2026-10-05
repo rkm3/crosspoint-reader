@@ -8,8 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "activities/Activity.h"
-#include "util/ButtonNavigator.h"
+#include "activities/UiListActivity.h"
 
 /**
  * Offline browser for the synced Readwise locations.
@@ -23,14 +22,13 @@
  * Only one visible window of metadata is resident at a time: documents are
  * ~800 bytes each and a full 100-document cap would be ~80 KB.
  */
-class ReadwiseLibraryActivity final : public Activity {
+class ReadwiseLibraryActivity final : public UiListActivity {
  public:
   explicit ReadwiseLibraryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("ReadwiseLibrary", renderer, mappedInput) {}
+      : UiListActivity("ReadwiseLibrary", renderer, mappedInput, true) {}
 
   void onEnter() override;
   void onExit() override;
-  void loop() override;
   void render(RenderLock&&) override;
 #ifdef CROSSPOINT_READWISE_ONLY
   // This library is the home screen in the Readwise-only build, so the home
@@ -46,10 +44,19 @@ class ReadwiseLibraryActivity final : public Activity {
     DOWNLOAD_FAILED,
   };
 
+  int listCount() const override { return totalRows(); }
+  void buildScreen(UiScreen& screen) override;
+  void activateIndex(int index) override;
+  void onRowLongPress(int index) override;
+  bool handleCustomInput() override;
+  bool handleButtons() override;
+  void drawChrome() override;
+  void drawFooter() override;
+  static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
+
   void reloadCounts();
   void ensureWindow(int docIndex);
   const readwise::Document* docAt(int docIndex);
-  void activateSelection();
   void openDocument(const readwise::Document& doc);
   void startDownload(const readwise::Document& doc);
   void performDownload();
@@ -74,8 +81,10 @@ class ReadwiseLibraryActivity final : public Activity {
   readwise::SdReadwiseFileStore store;
   std::unique_ptr<readwise::ReadwiseSyncEngine> engine;
 
-  ButtonNavigator buttonNavigator;
   State state = State::LIST;
+  // Composed "Library - Later" title. drawChrome fills it; the popup states
+  // use the plain library name instead.
+  char headerBuf[96] = {};
 
   // The library views, jumped between with Left/Right. Index 0 (Later) is the
   // default; leftTargetIndex/rightTargetIndex encode the button mapping.
@@ -83,8 +92,6 @@ class ReadwiseLibraryActivity final : public Activity {
                                                      readwise::Location::Feed};
   int locationIndex = 0;
   uint16_t docCount = 0;
-
-  int selectedIndex = 0;
 
   // Sliding metadata window backing the visible rows.
   std::vector<readwise::Document> window;

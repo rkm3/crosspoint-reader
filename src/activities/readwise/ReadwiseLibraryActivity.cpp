@@ -9,6 +9,7 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 
@@ -21,7 +22,8 @@
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
-#include "fontIds.h"
+
+namespace fui = freeink::ui;
 
 namespace {
 // Confirm held this long queues an archive instead of opening. Matches the
@@ -81,7 +83,7 @@ void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
 }
 
 void ReadwiseLibraryActivity::onEnter() {
-  Activity::onEnter();
+  UiListActivity::onEnter();
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
   if (!engine) {
     LOG_ERR("RWLIB", "OOM: sync engine; library will show empty");
@@ -98,7 +100,6 @@ void ReadwiseLibraryActivity::onEnter() {
   constexpr auto locationCount = static_cast<uint8_t>(std::size(LOCATIONS));
   locationIndex =
       APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
-  selectedIndex = 0;
   state = State::LIST;
   // Entered by a Back press that is very likely still held; see the member.
   ignoreBackUntilReleased = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -135,12 +136,14 @@ void ReadwiseLibraryActivity::reloadCounts() {
   docCount = engine ? engine->indexCount(LOCATIONS[locationIndex]) : 0;
   window.clear();
   windowStart = 0;
-  if (selectedIndex >= totalRows()) {
-    selectedIndex = totalRows() - 1;
+  int selected = nav.selected.load();
+  if (selected >= totalRows()) {
+    selected = totalRows() - 1;
   }
-  if (selectedIndex < 0) {
-    selectedIndex = 0;
+  if (selected < 0) {
+    selected = 0;
   }
+  nav.selected.store(selected);
 }
 
 void ReadwiseLibraryActivity::ensureWindow(const int docIndex) {
@@ -168,19 +171,19 @@ const readwise::Document* ReadwiseLibraryActivity::docAt(const int docIndex) {
 
 void ReadwiseLibraryActivity::jumpToLocation(const int index) {
   locationIndex = index;
-  selectedIndex = 0;
+  nav.reset(0);
   reloadCounts();
   requestUpdate();
 }
 
-void ReadwiseLibraryActivity::loop() {
+bool ReadwiseLibraryActivity::handleCustomInput() {
   if (ignoreBackUntilReleased) {
     // Skip this frame entirely so the in-flight Back release is consumed
     // without acting on it.
     if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
       ignoreBackUntilReleased = false;
     }
-    return;
+    return true;
   }
 
   if (state == State::DOWNLOAD_FAILED) {
@@ -189,14 +192,40 @@ void ReadwiseLibraryActivity::loop() {
       state = State::LIST;
       requestUpdate();
     }
-    return;
+    return true;
   }
   if (state == State::DOWNLOADING) {
-    // performDownload() runs synchronously from activateSelection(); nothing
+    // performDownload() runs synchronously from activateIndex(); nothing
     // to poll here.
-    return;
+    return true;
   }
 
+  if (handleLocationHold(MappedInputManager::Button::Left, leftTargetIndex())) {
+    return true;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;  // the hold already moved the article
+      return true;
+    }
+    jumpToLocation(leftTargetIndex());
+    return true;
+  }
+  if (handleLocationHold(MappedInputManager::Button::Right, rightTargetIndex())) {
+    return true;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;
+      return true;
+    }
+    jumpToLocation(rightTargetIndex());
+    return true;
+  }
+  return false;
+}
+
+bool ReadwiseLibraryActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
 #ifdef CROSSPOINT_READWISE_ONLY
     // This library IS home in the Readwise-only build; Back opens Settings
@@ -205,7 +234,7 @@ void ReadwiseLibraryActivity::loop() {
 #else
     onGoHome();
 #endif
-    return;
+    return true;
   }
 
   // Long-press Confirm archives, fired WHILE held -- the convention every
@@ -213,91 +242,51 @@ void ReadwiseLibraryActivity::loop() {
   // Checking held time on release instead looked equivalent but never
   // triggered in the hand.
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-    if (!holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
-      const readwise::Document* doc = docAt(selectedIndex - 1);
+    if (!holdActionTriggered && nav.selected.load() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+      const readwise::Document* doc = docAt(nav.selected.load() - 1);
       if (doc != nullptr) {
         holdActionTriggered = true;  // suppress the release below
         queueMove(*doc, readwise::Location::Archive);
       }
     }
-    return;
+    return true;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (holdActionTriggered) {
       holdActionTriggered = false;  // the hold already acted
-      return;
+      return true;
     }
-    activateSelection();
-    return;
-  }
-
-  if (handleLocationHold(MappedInputManager::Button::Left, leftTargetIndex())) {
-    return;
-  }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    if (holdActionTriggered) {
-      holdActionTriggered = false;  // the hold already moved the article
-      return;
+    const int selected = nav.selected.load();
+    if (selected >= 0 && selected < listCount()) {
+      activateIndex(selected);
     }
-    jumpToLocation(leftTargetIndex());
-    return;
+    return true;
   }
-  if (handleLocationHold(MappedInputManager::Button::Right, rightTargetIndex())) {
-    return;
-  }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    if (holdActionTriggered) {
-      holdActionTriggered = false;
-      return;
-    }
-    jumpToLocation(rightTargetIndex());
-    return;
-  }
-
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight =
-      renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
-  int touchSel = selectedIndex;
-  const auto listTouch = handleListTouch(touchSel, totalRows(), contentTop, contentHeight, true);
-  if (listTouch != ListTouchResult::None) {
-    selectedIndex = touchSel;
-    if (listTouch == ListTouchResult::Activated) {
-      activateSelection();
-    }
-    return;
-  }
-
-  const int pageItems = UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, true);
-  buttonNavigator.onNextRelease([this] {
-    selectedIndex = ButtonNavigator::nextIndex(selectedIndex, totalRows());
-    requestUpdate();
-  });
-  buttonNavigator.onPreviousRelease([this] {
-    selectedIndex = ButtonNavigator::previousIndex(selectedIndex, totalRows());
-    requestUpdate();
-  });
-  buttonNavigator.onNextContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::nextPageIndex(selectedIndex, totalRows(), pageItems);
-    requestUpdate();
-  });
-  buttonNavigator.onPreviousContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalRows(), pageItems);
-    requestUpdate();
-  });
+  return false;
 }
 
-void ReadwiseLibraryActivity::activateSelection() {
-  if (selectedIndex == 0) {
+void ReadwiseLibraryActivity::activateIndex(const int index) {
+  app.clearTapFlash();
+  if (index == 0) {
     activityManager.pushActivity(std::make_unique<ReadwiseSyncActivity>(renderer, mappedInput));
     return;
   }
-  const readwise::Document* doc = docAt(selectedIndex - 1);
+  const readwise::Document* doc = docAt(index - 1);
   if (doc == nullptr) {
     return;
   }
   openDocument(*doc);
+}
+
+void ReadwiseLibraryActivity::onRowLongPress(const int index) {
+  if (index <= 0) {
+    return;
+  }
+  const readwise::Document* doc = docAt(index - 1);
+  if (doc != nullptr) {
+    queueMove(*doc, readwise::Location::Archive);
+  }
 }
 
 void ReadwiseLibraryActivity::openDocument(const readwise::Document& doc) {
@@ -460,8 +449,8 @@ bool ReadwiseLibraryActivity::handleLocationHold(const MappedInputManager::Butto
   // Feed is server-side content rather than a shelf, so it is a view you can
   // switch to but never a destination you can send an article to.
   const bool movable = target == readwise::Location::Later || target == readwise::Location::Shortlist;
-  if (movable && !holdActionTriggered && selectedIndex > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
-    const readwise::Document* doc = docAt(selectedIndex - 1);
+  if (movable && !holdActionTriggered && nav.selected.load() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+    const readwise::Document* doc = docAt(nav.selected.load() - 1);
     if (doc != nullptr) {
       holdActionTriggered = true;  // suppress the release that follows
       queueMove(*doc, target);
@@ -484,85 +473,89 @@ void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const rea
   requestUpdate();
 }
 
-void ReadwiseLibraryActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect headerRect{0, metrics.topPadding, pageWidth, metrics.headerHeight};
-  // The Left/Right hints name the destination view, so the button for the
-  // current view reads as the way back to Later.
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), locationLabel(LOCATIONS[leftTargetIndex()]),
-                                            locationLabel(LOCATIONS[rightTargetIndex()]));
-
-  if (state == State::DOWNLOADING) {
-    GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
-    GUI.drawPopup(renderer, tr(STR_READWISE_DOWNLOADING));
-    renderer.displayBuffer();
+void ReadwiseLibraryActivity::render(RenderLock&& lock) {
+  if (state == State::LIST) {
+    UiListActivity::render(std::move(lock));
     return;
   }
-  if (state == State::DOWNLOAD_FAILED) {
-    GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
+
+  renderer.clearScreen();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect headerRect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight};
+  GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
+  if (state == State::DOWNLOADING) {
+    GUI.drawPopup(renderer, tr(STR_READWISE_DOWNLOADING));
+  } else {
     // drawPopup sizes to its text with no wrapping: the combined
     // "Download failed: <reason>" overflowed the 480px portrait width and
     // spammed per-pixel GFX clip errors. The translated reason alone fits and
     // says enough.
     GUI.drawPopup(renderer, statusMessage.c_str());
-    renderer.displayBuffer();
+  }
+  renderer.displayBuffer();
+}
+
+void ReadwiseLibraryActivity::drawChrome() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  snprintf(headerBuf, sizeof(headerBuf), "%s - %s", tr(STR_READWISE_LIBRARY), locationLabel(LOCATIONS[locationIndex]));
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, headerBuf);
+}
+
+void ReadwiseLibraryActivity::drawFooter() {
+  // The Left/Right hints name the destination view, so the button for the
+  // current view reads as the way back to Later.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), locationLabel(LOCATIONS[leftTargetIndex()]),
+                                            locationLabel(LOCATIONS[rightTargetIndex()]));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
+
+void ReadwiseLibraryActivity::provideRow(void* ctx, const uint16_t index, fui::ListItem& item) {
+  auto* self = static_cast<ReadwiseLibraryActivity*>(ctx);
+  item.actionValue = static_cast<int16_t>(index);
+  if (index == 0) {
+    item.label = tr(STR_READWISE_SYNC_NOW);
     return;
   }
-
-  const std::string header = std::string(tr(STR_READWISE_LIBRARY)) + " - " + locationLabel(LOCATIONS[locationIndex]);
-  GUI.drawHeader(renderer, headerRect, header.c_str());
-
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
-
-  // Preload the window for the visible page from the render-side index math so
-  // the row lambdas below never touch the SD card mid-draw.
-  const int pageItems = UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, true);
-  const int pageStart = (selectedIndex / pageItems) * pageItems;
-  ensureWindow(pageStart - 1);
-  ensureWindow(std::min(pageStart + pageItems - 1, totalRows() - 1) - 1);
-
-  if (docCount == 0) {
-    GUI.drawList(renderer, Rect{0, contentTop, pageWidth, contentHeight}, 1, selectedIndex,
-                 [](int) { return std::string(tr(STR_READWISE_SYNC_NOW)); });
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + contentHeight / 2,
-                      tr(STR_READWISE_NO_DOCUMENTS));
-  } else {
-    GUI.drawList(
-        renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalRows(), selectedIndex,
-        [this](const int index) -> std::string {
-          if (index == 0) {
-            return tr(STR_READWISE_SYNC_NOW);
-          }
-          const readwise::Document* doc = docAt(index - 1);
-          return doc != nullptr ? std::string(doc->title) : std::string();
-        },
-        [this](const int index) -> std::string {
-          if (index == 0) {
-            return {};
-          }
-          const readwise::Document* doc = docAt(index - 1);
-          if (doc == nullptr) {
-            return {};
-          }
-          return doc->author[0] != '\0' ? std::string(doc->author) : std::string(doc->siteName);
-        },
-        nullptr,
-        [this](const int index) -> std::string {
-          if (index == 0) {
-            return {};
-          }
-          const readwise::Document* doc = docAt(index - 1);
-          if (doc == nullptr) {
-            return {};
-          }
-          return (doc->flags & readwise::FLAG_HAS_BODY) != 0 ? "" : tr(STR_READWISE_NOT_DOWNLOADED);
-        });
+  const readwise::Document* doc = self->docAt(static_cast<int>(index) - 1);
+  if (doc == nullptr) {
+    return;
   }
+  item.label = doc->title;
+  item.subtitle = doc->author[0] != '\0' ? doc->author : doc->siteName;
+  if (item.subtitle != nullptr && item.subtitle[0] == '\0') {
+    item.subtitle = nullptr;
+  }
+  if ((doc->flags & readwise::FLAG_HAS_BODY) == 0) {
+    item.value = tr(STR_READWISE_NOT_DOWNLOADED);
+  }
+}
 
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
+void ReadwiseLibraryActivity::buildScreen(UiScreen& screen) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
+                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+
+  fui::ListProps props;
+  props.rowProvider = &ReadwiseLibraryActivity::provideRow;
+  props.rowProviderCtx = this;
+  props.count = static_cast<uint16_t>(totalRows());
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
+  props.valueInset = 8;
+  fui::TextStyle label = screen.theme().smallText;
+  label.maxLines = 2;
+  props.labelText = label;
+  props.subtitleText = screen.theme().smallText;
+  props.subtitleText.maxLines = 1;
+  syncListViewport(screen, props);
+  // The provider reads the metadata window. Load the first visible document
+  // before layout so a page that fits in one window does not hit the card
+  // once per row.
+  const int firstDoc = nav.top > 0 ? nav.top - 1 : 0;
+  ensureWindow(firstDoc);
+  screen.list(props);
+  if (docCount == 0) {
+    screen.centeredText(tr(STR_READWISE_NO_DOCUMENTS));
+  }
 }
