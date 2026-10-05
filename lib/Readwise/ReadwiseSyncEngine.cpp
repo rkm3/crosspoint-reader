@@ -855,6 +855,23 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
     hooks.onProgress(hooks.ctx, 0, outcome.total);
   }
 
+  // Carries the current article into the image-progress function pointer.
+  // Title points at scratchDoc_, which stays put for this iteration.
+  struct StepSink {
+    const BodySyncHooks* hooks = nullptr;
+    BodySyncProgress progress{};
+
+    void emit(BodySyncStep step, uint16_t index, uint16_t count) {
+      if (hooks == nullptr || hooks->onStep == nullptr) {
+        return;
+      }
+      progress.step = step;
+      progress.index = index;
+      progress.count = count;
+      hooks->onStep(hooks->ctx, progress);
+    }
+  };
+
   uint16_t done = 0;
   for (const MissingId& entry : missing) {
     ApiStatus status = ApiStatus::NetworkError;
@@ -866,6 +883,14 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
     const std::string xhtmlPath = articleDir(entry.id) + "/.body.xhtml";
     const std::string scratchPath = articleDir(entry.id) + "/.img.tmp";
 
+    StepSink sink;
+    sink.hooks = &hooks;
+    sink.progress.articlesDone = done;
+    sink.progress.articlesTotal = outcome.total;
+    sink.progress.title = haveDoc ? scratchDoc_.title : "";
+    sink.progress.wordCount = haveDoc ? scratchDoc_.wordCount : 0;
+    sink.progress.category = haveDoc ? scratchDoc_.category : Category::Unknown;
+
     for (int attempt = 0; attempt < 1 + MAX_RATE_LIMIT_RETRIES; ++attempt) {
       auto writer = makeUniqueNoThrow<ArticleBodyWriter>(store_, xhtmlPath, haveDoc ? scratchDoc_.sourceUrl : "",
                                                          haveDoc ? scratchDoc_.title : "");
@@ -874,6 +899,9 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
         break;
       }
       uint16_t retryAfter = 0;
+      // The HTML fetch is the long silent stretch: every tag is converted as
+      // it arrives, and the image list is only known once that finishes.
+      sink.emit(BodySyncStep::Article, 0, 0);
       status = api_.fetchBody(entry.id, *writer, &retryAfter);
       if (status == ApiStatus::Ok && !writer->committed()) {
         // 200 with no html_content string: nothing to retry.
@@ -887,9 +915,18 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
         NullArticleImageFetcher noImages;
         ArticleImageFetcher& fetcher =
             hooks.imageFetcher != nullptr ? *hooks.imageFetcher : static_cast<ArticleImageFetcher&>(noImages);
-        const ArticleAssemblyResult assembly =
-            assembleArticleEpub(store_, fetcher, *writer, xhtmlPath, scratchPath, bodyPath(entry.id),
-                                haveDoc ? scratchDoc_.title : "", haveDoc ? scratchDoc_.author : "");
+        const ArticleAssemblyResult assembly = assembleArticleEpub(
+            store_, fetcher, *writer, xhtmlPath, scratchPath, bodyPath(entry.id), haveDoc ? scratchDoc_.title : "",
+            haveDoc ? scratchDoc_.author : "",
+            [](void* raw, size_t index, size_t total) {
+              // The trailing (count, count) call repeats the last image.
+              if (raw == nullptr || total == 0 || index >= total) {
+                return;
+              }
+              static_cast<StepSink*>(raw)->emit(BodySyncStep::Image, static_cast<uint16_t>(index),
+                                                static_cast<uint16_t>(total));
+            },
+            &sink);
         if (!assembly.ok) {
           store_.remove(xhtmlPath);
           store_.remove(scratchPath);
@@ -906,6 +943,7 @@ ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(co
         if (waitMs > RATE_LIMIT_WAIT_CAP_MS) {
           waitMs = RATE_LIMIT_WAIT_CAP_MS;
         }
+        sink.emit(BodySyncStep::RateLimit, 0, 0);
         hooks.sleepMs(hooks.ctx, waitMs);
       }
     }

@@ -19,6 +19,36 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+namespace {
+
+const char* categoryLabel(const readwise::Category category) {
+  switch (category) {
+    case readwise::Category::Article:
+      return tr(STR_READWISE_CAT_ARTICLE);
+    case readwise::Category::Rss:
+      return tr(STR_READWISE_CAT_RSS);
+    case readwise::Category::Email:
+      return tr(STR_READWISE_CAT_EMAIL);
+    case readwise::Category::Tweet:
+      return tr(STR_READWISE_CAT_TWEET);
+    case readwise::Category::Pdf:
+      return tr(STR_READWISE_CAT_PDF);
+    case readwise::Category::Video:
+      return tr(STR_READWISE_CAT_VIDEO);
+    case readwise::Category::Highlight:
+      return tr(STR_READWISE_CAT_HIGHLIGHT);
+    case readwise::Category::Note:
+      return tr(STR_READWISE_CAT_NOTE);
+    case readwise::Category::Epub:
+      return tr(STR_READWISE_CAT_EPUB);
+    case readwise::Category::Unknown:
+      break;
+  }
+  return tr(STR_READWISE_CAT_UNKNOWN);
+}
+
+}  // namespace
+
 void ReadwiseSyncActivity::onEnter() {
   Activity::onEnter();
 
@@ -103,16 +133,45 @@ void ReadwiseSyncActivity::performSync() {
 
     readwise::ReadwiseSyncEngine::BodySyncHooks hooks;
     hooks.ctx = this;
-    hooks.onProgress = [](void* ctx, uint16_t done, uint16_t total) {
+    hooks.onProgress = [](void* ctx, uint16_t /*done*/, uint16_t total) {
       auto* self = static_cast<ReadwiseSyncActivity*>(ctx);
+      bool changed = false;
       {
         RenderLock lock(*self);
-        self->bodiesDone = done;
+        // Finished-article count comes from onStep. This only publishes how
+        // many articles there are, before the first one starts.
+        changed = self->bodiesTotal != total;
         self->bodiesTotal = total;
       }
       // Immediate: a deferred update only fires when loop() returns, and this
-      // whole pass runs blocking inside one loop() iteration -- deferring left
-      // the popup frozen at its initial 0/0 for the entire download.
+      // whole pass runs blocking inside one loop() iteration.
+      if (changed) {
+        self->requestUpdate(true);
+      }
+    };
+    hooks.onStep = [](void* ctx, const readwise::ReadwiseSyncEngine::BodySyncProgress& progress) {
+      auto* self = static_cast<ReadwiseSyncActivity*>(ctx);
+      {
+        RenderLock lock(*self);
+        self->bodiesDone = progress.articlesDone;
+        self->bodiesTotal = progress.articlesTotal;
+        self->currentWords = progress.wordCount;
+        self->currentCategory = progress.category;
+        self->stepIndex = progress.index;
+        self->stepCount = progress.count;
+        switch (progress.step) {
+          case readwise::ReadwiseSyncEngine::BodySyncStep::Article:
+            self->downloadStep = DownloadStep::Article;
+            break;
+          case readwise::ReadwiseSyncEngine::BodySyncStep::Image:
+            self->downloadStep = DownloadStep::Image;
+            break;
+          case readwise::ReadwiseSyncEngine::BodySyncStep::RateLimit:
+            self->downloadStep = DownloadStep::RateLimit;
+            break;
+        }
+        snprintf(self->currentTitle, sizeof(self->currentTitle), "%s", progress.title != nullptr ? progress.title : "");
+      }
       self->requestUpdate(true);
     };
     hooks.sleepMs = [](void*, uint32_t ms) { delay(ms); };
@@ -223,6 +282,105 @@ void ReadwiseSyncActivity::renderComplete() const {
   }
 }
 
+// Article count, the article being fetched, and either its category and word
+// count or which of its images is downloading. drawPopup is one line and does
+// not wrap, which hid all of that.
+void ReadwiseSyncActivity::renderDownloading() const {
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int gap = 6;
+  // BaseTheme::drawProgressBar paints its percent label this far below the bar.
+  constexpr int kPercentOffset = 15;
+
+  const int top = metrics.topPadding + metrics.headerHeight;
+  const int bottom = pageHeight - metrics.buttonHintsHeight;
+  const bool haveTotal = bodiesTotal > 0;
+
+  int block = lineHeight;  // heading
+  if (haveTotal) {
+    block += gap + lineHeight;  // count
+    block += gap + metrics.progressBarHeight + kPercentOffset + lineHeight;
+  }
+  block += gap + lineHeight + gap + lineHeight;  // title, detail
+  int y = top + (bottom - top - block) / 2;
+  if (y < top) {
+    y = top;
+  }
+
+  renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_READWISE_DOWNLOADING), true, EpdFontFamily::BOLD);
+  y += lineHeight + gap;
+
+  if (haveTotal) {
+    unsigned working = static_cast<unsigned>(bodiesDone) + 1;
+    if (working > bodiesTotal) {
+      working = bodiesTotal;
+    }
+    char counts[24];
+    snprintf(counts, sizeof(counts), "%u / %u", working, static_cast<unsigned>(bodiesTotal));
+    renderer.drawCenteredText(UI_10_FONT_ID, y, counts, true);
+    y += lineHeight + gap;
+
+    GUI.drawProgressBar(renderer,
+                        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
+                             metrics.progressBarHeight},
+                        bodiesDone, bodiesTotal);
+    y += metrics.progressBarHeight + kPercentOffset + lineHeight + gap;
+  }
+
+  const int available = pageWidth - metrics.contentSidePadding * 2;
+  if (currentTitle[0] != '\0' && available > 0) {
+    const char* shown = currentTitle;
+    std::string truncated;
+    if (renderer.getTextWidth(UI_10_FONT_ID, currentTitle, EpdFontFamily::BOLD) > available) {
+      truncated = renderer.truncatedText(UI_10_FONT_ID, currentTitle, available, EpdFontFamily::BOLD);
+      shown = truncated.c_str();
+    }
+    renderer.drawCenteredText(UI_10_FONT_ID, y, shown, true, EpdFontFamily::BOLD);
+  }
+  y += lineHeight + gap;
+
+  char detail[96];
+  detail[0] = '\0';
+  switch (downloadStep) {
+    case DownloadStep::Image:
+      if (stepCount > 0) {
+        unsigned shown = stepIndex;
+        if (shown < stepCount) {
+          ++shown;
+        }
+        snprintf(detail, sizeof(detail), "%s %u/%u", tr(STR_IMAGES), shown, static_cast<unsigned>(stepCount));
+      }
+      break;
+    case DownloadStep::RateLimit:
+      snprintf(detail, sizeof(detail), "%s", tr(STR_READWISE_RATE_LIMITED));
+      break;
+    case DownloadStep::Article: {
+      const bool named = currentCategory != readwise::Category::Unknown;
+      if (named && currentWords > 0) {
+        snprintf(detail, sizeof(detail), "%s · %lu %s", categoryLabel(currentCategory),
+                 static_cast<unsigned long>(currentWords), tr(STR_READWISE_WORDS));
+      } else if (named) {
+        snprintf(detail, sizeof(detail), "%s", categoryLabel(currentCategory));
+      } else if (currentWords > 0) {
+        snprintf(detail, sizeof(detail), "%lu %s", static_cast<unsigned long>(currentWords), tr(STR_READWISE_WORDS));
+      }
+      break;
+    }
+  }
+  if (detail[0] == '\0' || available <= 0) {
+    return;
+  }
+  const char* shown = detail;
+  std::string truncated;
+  if (renderer.getTextWidth(UI_10_FONT_ID, detail) > available) {
+    truncated = renderer.truncatedText(UI_10_FONT_ID, detail, available);
+    shown = truncated.c_str();
+  }
+  renderer.drawCenteredText(UI_10_FONT_ID, y, shown, true);
+}
+
 void ReadwiseSyncActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto pageWidth = renderer.getScreenWidth();
@@ -236,14 +394,9 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
     case State::SYNCING:
       GUI.drawPopup(renderer, tr(STR_READWISE_SYNCING));
       break;
-    case State::DOWNLOADING_BODIES: {
-      // drawPopup does not wrap, so keep this short: "Downloading article... 3/12".
-      char progress[64];
-      snprintf(progress, sizeof(progress), "%s %u/%u", tr(STR_READWISE_DOWNLOADING), (unsigned)bodiesDone,
-               (unsigned)bodiesTotal);
-      GUI.drawPopup(renderer, progress);
+    case State::DOWNLOADING_BODIES:
+      renderDownloading();
       break;
-    }
     case State::COMPLETE:
       renderComplete();
       break;

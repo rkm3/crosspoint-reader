@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ReadwiseDocument.h>
+
 #include <string>
 
 #include "activities/Activity.h"
@@ -41,6 +43,9 @@ class ReadwiseSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool connected);
   void performSync();
   void renderComplete() const;
+  void renderDownloading() const;
+
+  enum class DownloadStep : uint8_t { Article, Image, RateLimit };
 
   State state = State::CONNECTING;
   std::string statusMessage;
@@ -49,6 +54,14 @@ class ReadwiseSyncActivity final : public Activity {
   uint16_t bodiesDone = 0;
   uint16_t bodiesTotal = 0;
   uint16_t bodiesFailed = 0;
+  // What the body pass is doing right now. Copied out of the engine callback
+  // because the title pointer there dies when the callback returns.
+  DownloadStep downloadStep = DownloadStep::Article;
+  uint16_t stepIndex = 0;
+  uint16_t stepCount = 0;
+  uint32_t currentWords = 0;
+  readwise::Category currentCategory = readwise::Category::Unknown;
+  char currentTitle[readwise::TITLE_CAP] = {};
   // Title of the first article that failed, named on the summary screen.
   std::string failedTitle;
   bool wifiActivated = false;

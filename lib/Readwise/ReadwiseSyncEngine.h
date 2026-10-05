@@ -148,10 +148,30 @@ class ReadwiseSyncEngine {
   // sync WILL be throttled: on RateLimited the engine calls `hooks.sleepMs`
   // with the server's retry-after and retries that document. C function
   // pointers rather than std::function, per the library-code rule.
+  //
+  // One article is two long stretches: the HTML fetch (every tag is converted
+  // on the way in) and then each image that conversion named. `onStep` fires
+  // at the start of each stretch so the UI can say which.
+  enum class BodySyncStep : uint8_t { Article = 0, Image, RateLimit };
+  struct BodySyncProgress {
+    uint16_t articlesDone = 0;
+    uint16_t articlesTotal = 0;
+    // Points at engine scratch. Valid only for the duration of the call.
+    const char* title = "";
+    uint32_t wordCount = 0;
+    Category category = Category::Unknown;
+    BodySyncStep step = BodySyncStep::Article;
+    // Image index and count while `step` is Image. `index` is 0-based and
+    // names the image about to be fetched.
+    uint16_t index = 0;
+    uint16_t count = 0;
+  };
   struct BodySyncHooks {
     void* ctx = nullptr;
     // Progress after each document (done includes failures).
     void (*onProgress)(void* ctx, uint16_t done, uint16_t total) = nullptr;
+    // Finer progress inside one document. Optional.
+    void (*onStep)(void* ctx, const BodySyncProgress& progress) = nullptr;
     // Blocking wait; the activity supplies delay(). Never called with more
     // than RATE_LIMIT_WAIT_CAP_MS.
     void (*sleepMs)(void* ctx, uint32_t ms) = nullptr;
