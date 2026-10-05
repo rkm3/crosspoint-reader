@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "activities/UiTabListActivity.h"
+#include "activities/readwise/ReadwiseSupport.h"
+#include "components/OptionPopup.h"
 
 /**
  * Offline browser for the synced Readwise locations.
@@ -17,8 +19,8 @@
  * Shortlist, and Feed are tabs; each keeps its own selection and scroll.
  * Row 0 is "Sync now" (which pushes ReadwiseSyncActivity). A document row
  * opens a preamble; Confirm there opens the cached body or downloads it.
- * A long Confirm press queues an archive, which takes effect locally
- * immediately via rebuildLocal().
+ * A long press opens the entry menu. Holding Left or Right still sends the
+ * selected article to another shelf.
  *
  * Only one visible window of metadata is resident at a time: documents are
  * ~800 bytes each and a full 100-document cap would be ~80 KB.
@@ -47,6 +49,8 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
     LIST,
     DOWNLOADING,
     DOWNLOAD_FAILED,
+    DELETING,
+    NOTICE,
   };
 
   int listCount() const override { return totalRows(); }
@@ -74,6 +78,13 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void migrateLegacyTextBodies();
   static void sImageProgress(void* ctx, size_t done, size_t total);
   void queueMove(const readwise::Document& doc, readwise::Location target);
+  void showEntryMenu(int index);
+  void confirmDelete();
+  void pushDelete();
+  void startComment();
+  void applyAuthorFilter(const char* author);
+  void clearAuthorFilter();
+  bool authorFilterActive() const { return authorFilter[0] != '\0'; }
   // Long-pressing a location button sends the selected article there instead
   // of switching to that view. Returns true while the button is held, so the
   // caller swallows the frame.
@@ -123,9 +134,26 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   std::string pendingDownloadAuthor;
   bool pendingDownloadSeen = false;
   std::string statusMessage;
-  // Set when a hold has already acted (archive, or a move to another view), so
-  // the release that follows does not also open the document or switch views.
+  // Set when a hold has already acted (entry menu, or a move to another view),
+  // so the release that follows does not also open the document or switch views.
   bool holdActionTriggered = false;
+  // The Confirm release that opened the menu must not also select Archive.
+  bool swallowConfirmRelease = false;
+  OptionPopup optionPopup;
+  // Copied out of the sliding window before the menu acts. The window can be
+  // rebuilt before the confirmation or the keyboard returns.
+  char menuId[readwise::ID_CAP] = {};
+  char menuTitle[readwise::TITLE_CAP] = {};
+  char menuAuthor[readwise::AUTHOR_CAP] = {};
+  char menuRev[readwise::TIMESTAMP_CAP] = {};
+  ReadwiseUi::ReadwiseEntryAction menuActions[4] = {};
+  uint8_t menuActionCount = 0;
+  // Empty when the shelf is unfiltered. The header shows this string.
+  char authorFilter[readwise::AUTHOR_CAP] = {};
+  // Location-index offsets of the matching documents. One allocation when the
+  // filter is applied, sized to the shelf, rather than a resident copy of
+  // every matching record.
+  std::vector<uint16_t> authorSlots;
   bool wifiActivated = false;
   // Back is also what navigates *into* this screen (from Settings, or out of a
   // managed article), and the button is often still held when the activity is

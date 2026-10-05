@@ -30,9 +30,12 @@ bool buildBodyUrl(const char* id, char* out, size_t outCap);
 bool buildUpdateUrl(const char* id, char* out, size_t outCap);
 
 // The PATCH payload for a pending op: {"location":"later"} or {"seen":true}.
-// Returns false for an op that must never be pushed (unknown type, or a
-// location value outside the writable set).
+// Returns false for an op that must never be pushed (unknown type, Delete,
+// or a location value outside the writable set). Delete uses buildDeleteUrl.
 bool buildUpdateBody(const PendingOp& op, char* out, size_t outCap);
+
+// DELETE /delete/<id>/.
+bool buildDeleteUrl(const char* id, char* out, size_t outCap);
 
 // Maps an HTTP status (or a negative transport failure) to ApiStatus.
 ApiStatus statusFromHttp(int httpStatus);

@@ -21,15 +21,16 @@
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/util/ConfirmationActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 namespace {
-// Confirm held this long queues an archive instead of opening. Matches the
-// reader's GO_HOME_MS long-press feel.
-// Shared by every press-and-hold action on this screen: archive (Confirm) and
-// send-to-location (Left/Right).
+// Confirm held this long opens the entry menu instead of the article. Matches
+// the reader's GO_HOME_MS long-press feel. Shared with the Left/Right hold
+// that sends the selected article to another shelf.
 constexpr unsigned long HOLD_ACTION_MS = 1000;
 // One window of metadata; sized generously past a visible page.
 constexpr int WINDOW_SIZE = 32;
@@ -151,9 +152,21 @@ void ReadwiseLibraryActivity::rememberLocation() {
 }
 
 void ReadwiseLibraryActivity::reloadCounts() {
-  docCount = engine ? engine->indexCount(LOCATIONS[locationIndex]) : 0;
   window.clear();
   windowStart = 0;
+  if (authorFilterActive() && engine != nullptr) {
+    if (!engine->collectAuthorSlots(LOCATIONS[locationIndex], authorFilter, authorSlots)) {
+      LOG_ERR("RWLIB", "Author filter failed");
+      authorFilter[0] = '\0';
+      authorSlots.clear();
+      docCount = engine->indexCount(LOCATIONS[locationIndex]);
+    } else {
+      docCount = static_cast<uint16_t>(authorSlots.size());
+    }
+  } else {
+    authorSlots.clear();
+    docCount = engine ? engine->indexCount(LOCATIONS[locationIndex]) : 0;
+  }
   auto& n = activeNav();
   int selected = n.selected.load();
   const int ringSize = totalRows() + 1;
@@ -175,7 +188,15 @@ void ReadwiseLibraryActivity::ensureWindow(const int docIndex) {
   }
   windowStart = (docIndex / WINDOW_SIZE) * WINDOW_SIZE;
   const uint16_t wanted = static_cast<uint16_t>(std::min<int>(WINDOW_SIZE, static_cast<int>(docCount) - windowStart));
-  if (!engine->readIndexPage(LOCATIONS[locationIndex], static_cast<uint16_t>(windowStart), wanted, window)) {
+  bool loaded = false;
+  if (authorFilterActive()) {
+    if (windowStart >= 0 && windowStart + wanted <= static_cast<int>(authorSlots.size())) {
+      loaded = engine->readIndexSlots(LOCATIONS[locationIndex], authorSlots.data() + windowStart, wanted, window);
+    }
+  } else {
+    loaded = engine->readIndexPage(LOCATIONS[locationIndex], static_cast<uint16_t>(windowStart), wanted, window);
+  }
+  if (!loaded) {
     window.clear();
   }
 }
@@ -193,6 +214,9 @@ void ReadwiseLibraryActivity::selectTab(const int index) {
   if (index < 0 || index >= LOCATION_COUNT || index == locationIndex) {
     return;
   }
+  // The filter is a view of one shelf. Switching shelves drops it.
+  authorFilter[0] = '\0';
+  authorSlots.clear();
   locationIndex = index;
   reloadCounts();
   requestUpdate();
@@ -224,6 +248,22 @@ void ReadwiseLibraryActivity::stepTab(const int direction) {
 }
 
 bool ReadwiseLibraryActivity::handleCustomInput() {
+  // The release that opened the menu is still in this press. Swallow it so
+  // the popup does not treat it as Confirm on Archive.
+  if (swallowConfirmRelease) {
+    const bool released = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
+    const bool held = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+    if (released || !held) {
+      swallowConfirmRelease = false;
+    }
+    if (held || released) {
+      return true;
+    }
+  }
+  if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) {
+    return true;
+  }
+
   if (ignoreBackUntilReleased) {
     // Skip this frame entirely so the in-flight Back release is consumed
     // without acting on it.
@@ -233,7 +273,10 @@ bool ReadwiseLibraryActivity::handleCustomInput() {
     return true;
   }
 
-  if (state == State::DOWNLOAD_FAILED) {
+  if (state == State::DELETING) {
+    return true;
+  }
+  if (state == State::NOTICE || state == State::DOWNLOAD_FAILED) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
         mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       state = State::LIST;
@@ -274,6 +317,10 @@ bool ReadwiseLibraryActivity::handleCustomInput() {
 
 bool ReadwiseLibraryActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    if (authorFilterActive()) {
+      clearAuthorFilter();
+      return true;
+    }
 #ifdef CROSSPOINT_READWISE_ONLY
     // This library IS home in the Readwise-only build; Back opens Settings
     // (whose Back returns here via the re-routed goHome()).
@@ -284,17 +331,13 @@ bool ReadwiseLibraryActivity::handleButtons() {
     return true;
   }
 
-  // Long-press Confirm archives, fired WHILE held -- the convention every
-  // other activity uses (see EpubReaderActivity's long-press menu function).
-  // Checking held time on release instead looked equivalent but never
-  // triggered in the hand.
+  // Long-press Confirm opens the entry menu, fired WHILE held. Checking held
+  // time on release instead looked equivalent but never triggered in the hand.
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
     if (!holdActionTriggered && selectedRow() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
-      const readwise::Document* doc = docAt(selectedRow() - 1);
-      if (doc != nullptr) {
-        holdActionTriggered = true;  // suppress the release below
-        queueMove(*doc, readwise::Location::Archive);
-      }
+      holdActionTriggered = true;  // suppress the release below
+      swallowConfirmRelease = true;
+      showEntryMenu(selectedRow());
     }
     return true;
   }
@@ -337,6 +380,28 @@ void ReadwiseLibraryActivity::activateIndex(const int index) {
     if (result.isCancelled) {
       return;
     }
+    if (const auto* shelf = std::get_if<ReadwisePreambleResult>(&result.data)) {
+      if (shelf->action == ReadwisePreambleResult::Action::FilterAuthor) {
+        applyAuthorFilter(shelf->author);
+        return;
+      }
+      const readwise::Document* acted = docAt(docIndex);
+      if (acted == nullptr) {
+        LOG_ERR("RWLIB", "Menu article left the shelf");
+        return;
+      }
+      readwise::copyBounded(menuId, sizeof(menuId), acted->id, strlen(acted->id));
+      readwise::copyBounded(menuTitle, sizeof(menuTitle), acted->title, strlen(acted->title));
+      readwise::copyBounded(menuRev, sizeof(menuRev), acted->updatedAt, strlen(acted->updatedAt));
+      if (shelf->action == ReadwisePreambleResult::Action::Archive) {
+        queueMove(*acted, readwise::Location::Archive);
+        return;
+      }
+      if (shelf->action == ReadwisePreambleResult::Action::Delete) {
+        pushDelete();
+        return;
+      }
+    }
     const readwise::Document* opened = docAt(docIndex);
     if (opened == nullptr) {
       LOG_ERR("RWLIB", "Opened article left the shelf");
@@ -347,13 +412,8 @@ void ReadwiseLibraryActivity::activateIndex(const int index) {
 }
 
 void ReadwiseLibraryActivity::onRowLongPress(const int index) {
-  if (index <= 0) {
-    return;
-  }
-  const readwise::Document* doc = docAt(index - 1);
-  if (doc != nullptr) {
-    queueMove(*doc, readwise::Location::Archive);
-  }
+  app.clearTapFlash();
+  showEntryMenu(index);
 }
 
 void ReadwiseLibraryActivity::openDocument(const readwise::Document& doc) {
@@ -541,6 +601,9 @@ void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const rea
 }
 
 void ReadwiseLibraryActivity::render(RenderLock&& lock) {
+  if (optionPopup.processRender(renderer, mappedInput)) {
+    return;
+  }
   if (state == State::LIST) {
     UiTabListActivity::render(std::move(lock));
     return;
@@ -552,6 +615,8 @@ void ReadwiseLibraryActivity::render(RenderLock&& lock) {
   GUI.drawHeader(renderer, headerRect, tr(STR_READWISE_LIBRARY));
   if (state == State::DOWNLOADING) {
     GUI.drawPopup(renderer, tr(STR_READWISE_DOWNLOADING));
+  } else if (state == State::DELETING) {
+    GUI.drawPopup(renderer, tr(STR_READWISE_DELETING));
   } else {
     // drawPopup sizes to its text with no wrapping: the combined
     // "Download failed: <reason>" overflowed the 480px portrait width and
@@ -562,7 +627,12 @@ void ReadwiseLibraryActivity::render(RenderLock&& lock) {
   renderer.displayBuffer();
 }
 
-const char* ReadwiseLibraryActivity::headerTitle() const { return tr(STR_READWISE_LIBRARY); }
+const char* ReadwiseLibraryActivity::headerTitle() const {
+  if (authorFilterActive()) {
+    return authorFilter;
+  }
+  return tr(STR_READWISE_LIBRARY);
+}
 
 void ReadwiseLibraryActivity::drawFooter() {
   // The Left/Right hints name the destination view, so the button for the
@@ -630,6 +700,172 @@ void ReadwiseLibraryActivity::buildScreen(UiScreen& screen) {
   ensureWindow(firstDoc);
   screen.list(props);
   if (docCount == 0) {
-    screen.centeredText(tr(STR_READWISE_NO_DOCUMENTS));
+    screen.centeredText(authorFilterActive() ? tr(STR_READWISE_NO_AUTHOR) : tr(STR_READWISE_NO_DOCUMENTS));
   }
+}
+
+void ReadwiseLibraryActivity::showEntryMenu(const int index) {
+  if (optionPopup.isActive() || index <= 0 || engine == nullptr) {
+    return;
+  }
+  const readwise::Document* doc = docAt(index - 1);
+  if (doc == nullptr) {
+    return;
+  }
+  readwise::copyBounded(menuId, sizeof(menuId), doc->id, strlen(doc->id));
+  readwise::copyBounded(menuTitle, sizeof(menuTitle), doc->title, strlen(doc->title));
+  readwise::copyBounded(menuAuthor, sizeof(menuAuthor), doc->author, strlen(doc->author));
+  readwise::copyBounded(menuRev, sizeof(menuRev), doc->updatedAt, strlen(doc->updatedAt));
+
+  const char* labels[4] = {};
+  menuActionCount = ReadwiseUi::fillReadwiseEntryMenu(menuAuthor, labels, menuActions, 4);
+  if (menuActionCount == 0) {
+    return;
+  }
+  const char* title = menuTitle[0] != '\0' ? menuTitle : tr(STR_READWISE_LIBRARY);
+  optionPopup.show(title, labels, menuActionCount, 0, [this](const int selected) {
+    if (selected < 0 || selected >= menuActionCount) {
+      return;
+    }
+    switch (menuActions[selected]) {
+      case ReadwiseUi::ReadwiseEntryAction::Archive:
+        if (engine->queueLocationChange(menuId, readwise::Location::Archive, menuRev)) {
+          engine->rebuildLocal();
+          reloadCounts();
+          requestUpdate();
+        }
+        break;
+      case ReadwiseUi::ReadwiseEntryAction::Delete:
+        confirmDelete();
+        break;
+      case ReadwiseUi::ReadwiseEntryAction::Comment:
+        startComment();
+        break;
+      case ReadwiseUi::ReadwiseEntryAction::Author:
+        applyAuthorFilter(menuAuthor);
+        break;
+    }
+  });
+  requestUpdate();
+}
+
+void ReadwiseLibraryActivity::confirmDelete() {
+  const std::string heading = std::string(tr(STR_DELETE)) + "? ";
+  auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, menuTitle);
+  if (!confirmation) {
+    LOG_ERR("RWLIB", "OOM: delete confirmation");
+    return;
+  }
+  startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
+    if (result.isCancelled) {
+      return;
+    }
+    pushDelete();
+  });
+}
+
+void ReadwiseLibraryActivity::pushDelete() {
+  if (engine == nullptr || !engine->queueDelete(menuId, menuRev)) {
+    LOG_ERR("RWLIB", "Could not queue delete");
+    return;
+  }
+  const bool online = READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0);
+  if (!online) {
+    {
+      RenderLock lock(*this);
+      state = State::NOTICE;
+      statusMessage = READWISE_STORE.hasToken() ? tr(STR_READWISE_DELETE_ON_SYNC) : tr(STR_READWISE_SET_TOKEN_FIRST);
+    }
+    requestUpdate();
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    state = State::DELETING;
+  }
+  requestUpdateAndWait();
+
+  readwise::HttpReadwiseApi api(READWISE_STORE.getToken());
+  const readwise::PendingOp* op = engine->journal().findLatest(menuId, readwise::OpType::Delete);
+  if (op == nullptr) {
+    LOG_ERR("RWLIB", "Queued delete missing");
+    state = State::LIST;
+    requestUpdate();
+    return;
+  }
+  const uint32_t seq = op->seq;
+  const readwise::ApiStatus status = api.pushOp(*op);
+  if (status != readwise::ApiStatus::Ok) {
+    LOG_ERR("RWLIB", "Delete push failed: %s", readwise::apiStatusName(status));
+    {
+      RenderLock lock(*this);
+      state = State::NOTICE;
+      statusMessage = I18N.get(ReadwiseUi::statusStrId(status));
+    }
+    requestUpdate();
+    return;
+  }
+  if (!engine->forgetDocument(menuId)) {
+    LOG_ERR("RWLIB", "Server deleted %s but the local record remains", menuId);
+    {
+      RenderLock lock(*this);
+      state = State::NOTICE;
+      statusMessage = tr(STR_READWISE_SERVER_ERROR);
+    }
+    requestUpdate();
+    return;
+  }
+  std::vector<uint32_t> acknowledged;
+  acknowledged.push_back(seq);
+  engine->journal().removeAcknowledged(acknowledged);
+  state = State::LIST;
+  reloadCounts();
+  requestUpdate();
+}
+
+void ReadwiseLibraryActivity::startComment() {
+  char existing[readwise::ReadwiseSyncEngine::NOTE_CAP] = {};
+  if (engine != nullptr) {
+    engine->readNote(menuId, existing, sizeof(existing));
+  }
+  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_READWISE_COMMENT), existing,
+                                                           readwise::ReadwiseSyncEngine::NOTE_CAP - 1);
+  if (!keyboard) {
+    LOG_ERR("RWLIB", "OOM: comment keyboard");
+    return;
+  }
+  startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
+    if (result.isCancelled || engine == nullptr) {
+      return;
+    }
+    const auto* entered = std::get_if<KeyboardResult>(&result.data);
+    if (entered == nullptr) {
+      return;
+    }
+    if (!engine->writeNote(menuId, entered->text.c_str())) {
+      LOG_ERR("RWLIB", "Could not save note");
+    }
+  });
+}
+
+void ReadwiseLibraryActivity::applyAuthorFilter(const char* author) {
+  if (engine == nullptr || author == nullptr || author[0] == '\0') {
+    return;
+  }
+  readwise::copyBounded(authorFilter, sizeof(authorFilter), author, strlen(author));
+  reloadCounts();
+  activeNav().reset(1);
+  requestUpdate();
+}
+
+void ReadwiseLibraryActivity::clearAuthorFilter() {
+  if (!authorFilterActive()) {
+    return;
+  }
+  authorFilter[0] = '\0';
+  authorSlots.clear();
+  reloadCounts();
+  activeNav().reset(1);
+  requestUpdate();
 }

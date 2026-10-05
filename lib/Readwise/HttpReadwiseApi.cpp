@@ -168,6 +168,30 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
     return ApiStatus::NoCredentials;
   }
   char url[URL_CAP];
+  if (op.op == OpType::Delete) {
+    if (!buildDeleteUrl(op.id, url, sizeof(url))) {
+      LOG_ERR("RWAPI", "Unpushable delete for %s", op.id);
+      return ApiStatus::ServerError;
+    }
+    if (insufficientHeap()) {
+      return ApiStatus::LowMemory;
+    }
+    freeink::SecureHttpClient http;
+    if (!http.begin(url)) {
+      return ApiStatus::NetworkError;
+    }
+    configureClient(http, token);
+    const int status = http.sendRequest("DELETE", "");
+    http.end();
+    LOG_DBG("RWAPI", "DELETE %s -> %d", url, status);
+    // A repeated delete of a document the server already removed. Treating it
+    // as success lets the journal entry drain instead of stalling the queue.
+    if (status == 404) {
+      return ApiStatus::Ok;
+    }
+    return statusFromHttp(status);
+  }
+
   char body[64];
   if (!buildUpdateUrl(op.id, url, sizeof(url)) || !buildUpdateBody(op, body, sizeof(body))) {
     LOG_ERR("RWAPI", "Unpushable op %u for %s", static_cast<unsigned>(op.op), op.id);

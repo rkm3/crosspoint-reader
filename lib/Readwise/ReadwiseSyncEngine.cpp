@@ -79,6 +79,19 @@ bool ReadwiseSyncEngine::queueLocationChange(const char* id, Location location, 
   return journal_.append(OpType::SetLocation, id, static_cast<uint8_t>(location), remoteRev);
 }
 
+bool ReadwiseSyncEngine::queueDelete(const char* id, const char* remoteRev) {
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  // append writes whatever is already in memory. Load first so a caller that
+  // has not queued anything this session cannot replace the journal with one
+  // entry.
+  if (!journal_.load()) {
+    return false;
+  }
+  return journal_.append(OpType::Delete, id, 0, remoteRev);
+}
+
 bool ReadwiseSyncEngine::queueSeen(const char* id, const char* remoteRev) {
   return journal_.append(OpType::SetSeen, id, 1, remoteRev);
 }
@@ -132,6 +145,14 @@ SyncOutcome ReadwiseSyncEngine::sync() {
       // accepted by the server is not repeated on the next pass.
       journal_.removeAcknowledged(acknowledged);
       outcome.status = status;
+      return outcome;
+    }
+    // The server has accepted the delete. Drop the local copy before the
+    // journal entry is acknowledged: an incremental pull will not mention the
+    // deletion, so a record left behind would stay forever.
+    if (op.op == OpType::Delete && !forgetDocument(op.id)) {
+      journal_.removeAcknowledged(acknowledged);
+      outcome.status = ApiStatus::ServerError;
       return outcome;
     }
     acknowledged.push_back(op.seq);
@@ -191,8 +212,9 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   store_.remove(stagingPath());
   if (!journal_.removeAcknowledged(acknowledged)) {
     // The sync itself committed; failing to trim the journal only means the
-    // acknowledged ops are retried next pass, which is harmless for the two
-    // idempotent operations we queue.
+    // acknowledged ops are retried next pass, which is harmless: location and
+    // seen write the same value again, and a repeated delete is treated as
+    // success when the server says the document is already gone.
     outcome.ok = true;
     outcome.failedStage = SyncStage::Idle;
     return outcome;
@@ -480,6 +502,10 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       store_.abortWrite();
       return false;
     }
+    if (droppingId_[0] != '\0' && sameId(scratchDoc_.id, droppingId_)) {
+      store_.removeTree(articleDir(scratchDoc_.id));
+      continue;
+    }
     restoreLocalFlags(scratchDoc_);
     const bool isFeed = scratchDoc_.location == Location::Feed;
     uint16_t& classWritten = isFeed ? feedWritten : nonFeedWritten;
@@ -522,6 +548,11 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
         break;
       }
       readOffset += static_cast<uint32_t>(consumed);
+
+      if (droppingId_[0] != '\0' && sameId(scratchDoc_.id, droppingId_)) {
+        store_.removeTree(articleDir(scratchDoc_.id));
+        continue;
+      }
 
       const StagedRef* superseding = nullptr;
       for (const StagedRef& ref : staged) {
@@ -791,6 +822,148 @@ bool ReadwiseSyncEngine::findDocument(const char* id, Document& out) {
     offset += static_cast<uint32_t>(consumed);
   }
   return false;
+}
+
+std::string ReadwiseSyncEngine::notePath(const char* id) const { return baseDir_ + "/notes/" + id + ".txt"; }
+
+bool ReadwiseSyncEngine::readNote(const char* id, char* out, size_t outCap) {
+  if (out == nullptr || outCap == 0) {
+    return false;
+  }
+  out[0] = '\0';
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  const std::string path = notePath(id);
+  if (!store_.exists(path)) {
+    return false;
+  }
+  const int read = store_.readRange(path, 0, reinterpret_cast<uint8_t*>(out), outCap - 1);
+  if (read < 0) {
+    out[0] = '\0';
+    return false;
+  }
+  out[read] = '\0';
+  return out[0] != '\0';
+}
+
+bool ReadwiseSyncEngine::writeNote(const char* id, const char* text) {
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  const std::string path = notePath(id);
+  if (text == nullptr || text[0] == '\0') {
+    if (!store_.exists(path)) {
+      return true;
+    }
+    return store_.remove(path);
+  }
+  if (!store_.ensureDir(baseDir_ + "/notes")) {
+    return false;
+  }
+  char bounded[NOTE_CAP];
+  copyBounded(bounded, NOTE_CAP, text, strlen(text));
+  return store_.writeAll(path, reinterpret_cast<const uint8_t*>(bounded), strlen(bounded));
+}
+
+bool ReadwiseSyncEngine::forgetDocument(const char* id) {
+  if (!isValidDocumentId(id)) {
+    return false;
+  }
+  copyBounded(droppingId_, ID_CAP, id, strlen(id));
+  store_.removeTree(articleDir(id));
+  writeNote(id, "");
+  std::vector<IndexEntry> indexEntries;
+  indexEntries.reserve(static_cast<size_t>(documentCap_) + feedCap_);
+  uint16_t retained = 0;
+  const bool merged =
+      mergeIntoDocs(docsPath(), {}, /*carryOverExisting=*/true, /*dropExpired=*/false, indexEntries, retained);
+  droppingId_[0] = '\0';
+  if (!merged) {
+    return false;
+  }
+  return writeIndexes(indexEntries);
+}
+
+bool ReadwiseSyncEngine::readIndexBounds(const Location location, uint16_t& total, DocsHeader& header) {
+  uint8_t indexHeader[INDEX_HEADER_SIZE];
+  if (store_.readRange(indexPath(location), 0, indexHeader, INDEX_HEADER_SIZE) != static_cast<int>(INDEX_HEADER_SIZE) ||
+      !decodeIndexHeader(indexHeader, INDEX_HEADER_SIZE, total)) {
+    return false;
+  }
+  uint8_t docsHeaderBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, docsHeaderBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(docsHeaderBuffer, DOCS_HEADER_SIZE, header)) {
+    return false;
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::loadIndexedDocument(const Location location, const uint16_t slot, const DocsHeader& header) {
+  uint8_t entry[INDEX_ENTRY_SIZE];
+  const size_t entryOffset = INDEX_HEADER_SIZE + static_cast<size_t>(slot) * INDEX_ENTRY_SIZE;
+  if (store_.readRange(indexPath(location), entryOffset, entry, INDEX_ENTRY_SIZE) != static_cast<int>(INDEX_ENTRY_SIZE)) {
+    return false;
+  }
+  const uint16_t recordIndex = decodeIndexEntry(entry);
+  if (recordIndex >= header.recordCount) {
+    return false;
+  }
+  uint8_t lutEntry[4];
+  const size_t lutOffset = header.lutOffset + static_cast<size_t>(recordIndex) * 4;
+  if (store_.readRange(docsPath(), lutOffset, lutEntry, 4) != 4) {
+    return false;
+  }
+  const uint32_t recordOffset = static_cast<uint32_t>(lutEntry[0]) | (static_cast<uint32_t>(lutEntry[1]) << 8) |
+                                (static_cast<uint32_t>(lutEntry[2]) << 16) | (static_cast<uint32_t>(lutEntry[3]) << 24);
+  const int read = store_.readRange(docsPath(), recordOffset, recordBuffer_, MAX_ENCODED_RECORD);
+  return read > 0 && decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_);
+}
+
+bool ReadwiseSyncEngine::collectAuthorSlots(const Location location, const char* author, std::vector<uint16_t>& out) {
+  out.clear();
+  if (author == nullptr || author[0] == '\0') {
+    return false;
+  }
+  uint16_t total = 0;
+  DocsHeader header;
+  if (!readIndexBounds(location, total, header)) {
+    return indexCount(location) == 0;
+  }
+  out.reserve(total);
+  for (uint16_t i = 0; i < total; ++i) {
+    if (!loadIndexedDocument(location, i, header)) {
+      return false;
+    }
+    if (strncmp(scratchDoc_.author, author, AUTHOR_CAP) == 0) {
+      out.push_back(i);
+    }
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::readIndexSlots(const Location location, const uint16_t* slots, const uint16_t slotCount,
+                                        std::vector<Document>& out) {
+  out.clear();
+  if (slotCount == 0) {
+    return true;
+  }
+  if (slots == nullptr) {
+    return false;
+  }
+  uint16_t total = 0;
+  DocsHeader header;
+  if (!readIndexBounds(location, total, header)) {
+    return false;
+  }
+  out.reserve(slotCount);
+  for (uint16_t i = 0; i < slotCount; ++i) {
+    if (slots[i] >= total || !loadIndexedDocument(location, slots[i], header)) {
+      return false;
+    }
+    out.push_back(scratchDoc_);
+  }
+  return true;
 }
 
 ReadwiseSyncEngine::BodySyncOutcome ReadwiseSyncEngine::downloadMissingBodies(const BodySyncHooks& hooks) {

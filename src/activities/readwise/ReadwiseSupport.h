@@ -33,4 +33,11 @@ std::string titleForBodyPath(const std::string& path);
 // through this; readwise::apiStatusName() stays log-only English.
 StrId statusStrId(readwise::ApiStatus status);
 
+// The long-press menu on a library row and on the preamble. Author is omitted
+// when `author` is empty: the row then shows the site, and filtering on the
+// site is a different action.
+enum class ReadwiseEntryAction : uint8_t { Archive = 0, Delete, Comment, Author };
+
+uint8_t fillReadwiseEntryMenu(const char* author, const char** labels, ReadwiseEntryAction* actions, uint8_t cap);
+
 }  // namespace ReadwiseUi

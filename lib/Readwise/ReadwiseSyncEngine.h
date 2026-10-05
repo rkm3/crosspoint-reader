@@ -117,9 +117,28 @@ class ReadwiseSyncEngine {
   // indistinguishable from one that was deleted.
   SyncOutcome reconcile();
 
-  // Queues a local action. These are the only two operations the API honours.
+  // Queues a local action. Location and seen are PATCH. Delete is DELETE, and
+  // the local record stays until that push is accepted.
   bool queueLocationChange(const char* id, Location location, const char* remoteRev);
   bool queueSeen(const char* id, const char* remoteRev);
+  bool queueDelete(const char* id, const char* remoteRev);
+
+  // Drops the local record, cached body, and note. Call only after the server
+  // has accepted the delete. A failed push must leave the document in place.
+  bool forgetDocument(const char* id);
+
+  // A note kept beside the document, not in docs.bin. Empty text removes it.
+  // `out` is always NUL-terminated. Returns false when there is no note.
+  static constexpr size_t NOTE_CAP = 241;
+  bool readNote(const char* id, char* out, size_t outCap);
+  bool writeNote(const char* id, const char* text);
+
+  // Location-index offsets whose author matches, in shelf order. One document
+  // is decoded at a time. `author` is the stored AUTHOR_CAP string.
+  bool collectAuthorSlots(Location location, const char* author, std::vector<uint16_t>& out);
+
+  // Loads the documents at those location-index offsets, in the order given.
+  bool readIndexSlots(Location location, const uint16_t* slots, uint16_t slotCount, std::vector<Document>& out);
 
   // Reads one page of a location index without loading the rest. `out` is
   // cleared and filled with at most `count` documents.
@@ -259,6 +278,10 @@ class ReadwiseSyncEngine {
   bool writeIndexes(std::vector<IndexEntry>& indexEntries);
   bool commitCheckpoint(const char* updatedAfter, uint16_t docCount);
   void applyQueuedOverrides(Document& doc) const;
+  bool readIndexBounds(Location location, uint16_t& total, DocsHeader& header);
+  // Fills scratchDoc_ from one location-index slot.
+  bool loadIndexedDocument(Location location, uint16_t slot, const DocsHeader& header);
+  std::string notePath(const char* id) const;
 
   std::string stagingPath() const { return baseDir_ + "/incoming.bin"; }
 
@@ -273,6 +296,9 @@ class ReadwiseSyncEngine {
   // Document is ~800 bytes, well over the project's 256-byte stack guidance.
   Document scratchDoc_;
   uint8_t recordBuffer_[MAX_ENCODED_RECORD];
+  // Set for the duration of forgetDocument's rewrite. mergeIntoDocs skips it
+  // and drops its body instead of carrying it forward.
+  char droppingId_[ID_CAP] = {};
 };
 
 }  // namespace readwise

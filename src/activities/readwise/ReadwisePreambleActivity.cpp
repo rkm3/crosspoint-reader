@@ -11,11 +11,15 @@
 #include <utility>
 
 #include "ReadwiseCredentialStore.h"
+#include "activities/util/ConfirmationActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 namespace {
+
+constexpr unsigned long HOLD_ACTION_MS = 1000;
 
 const char* categoryLabel(const readwise::Category category) {
   switch (category) {
@@ -74,6 +78,7 @@ void ReadwisePreambleActivity::onEnter() {
     loaded = true;
     snprintf(wordsBuf, sizeof(wordsBuf), "%lu", static_cast<unsigned long>(doc.wordCount));
     snprintf(progressBuf, sizeof(progressBuf), "%u%%", static_cast<unsigned>(doc.readingProgressPercent));
+    engine->readNote(documentId, noteBuf, sizeof(noteBuf));
     rebuildRows();
   }
   engine.reset();
@@ -101,6 +106,7 @@ void ReadwisePreambleActivity::rebuildRows() {
   if (doc.updatedAt[0] != '\0') add(Row::Updated);
   if (doc.lastMovedAt[0] != '\0') add(Row::Moved);
   add(Row::Downloaded);
+  if (noteBuf[0] != '\0') add(Row::Note);
 }
 
 void ReadwisePreambleActivity::openTrampoline(const fui::ActionEvent&, void* user) {
@@ -118,12 +124,64 @@ void ReadwisePreambleActivity::confirmOpen() {
 
 void ReadwisePreambleActivity::cancel() { finish(); }
 
+bool ReadwisePreambleActivity::handleCustomInput() {
+  if (swallowConfirmRelease) {
+    const bool released = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
+    const bool held = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+    if (released || !held) {
+      swallowConfirmRelease = false;
+    }
+    if (held || released) {
+      return true;
+    }
+  }
+  if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) {
+    return true;
+  }
+  int x = 0;
+  int y = 0;
+  if (loaded && mappedInput.wasScreenLongPress(x, y)) {
+    showEntryMenu();
+    return true;
+  }
+  return false;
+}
+
+bool ReadwisePreambleActivity::handleHomeGesture() {
+  if (!loaded) {
+    return false;
+  }
+  if (!optionPopup.isActive()) {
+    showEntryMenu();
+  }
+  return true;
+}
+
+void ReadwisePreambleActivity::render(RenderLock&& lock) {
+  if (optionPopup.processRender(renderer, mappedInput)) {
+    return;
+  }
+  UiListActivity::render(std::move(lock));
+}
+
 bool ReadwisePreambleActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     cancel();
     return true;
   }
+  if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+    if (loaded && !holdActionTriggered && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+      holdActionTriggered = true;
+      swallowConfirmRelease = true;
+      showEntryMenu();
+    }
+    return true;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (holdActionTriggered) {
+      holdActionTriggered = false;
+      return true;
+    }
     confirmOpen();
     return true;
   }
@@ -197,6 +255,10 @@ void ReadwisePreambleActivity::provideRow(void* ctx, const uint16_t index, fui::
       item.label = tr(STR_READWISE_DOWNLOADED);
       item.subtitle = (doc.flags & readwise::FLAG_HAS_BODY) != 0 ? tr(STR_YES) : tr(STR_NO);
       return;
+    case Row::Note:
+      item.label = tr(STR_READWISE_NOTE);
+      item.subtitle = self->noteBuf;
+      return;
   }
 }
 
@@ -227,4 +289,95 @@ void ReadwisePreambleActivity::buildScreen(UiScreen& screen) {
   props.subtitleText.maxLines = 8;
   syncListViewport(screen, props);
   screen.list(props);
+}
+
+void ReadwisePreambleActivity::finishWith(const ReadwisePreambleResult::Action action) {
+  ReadwisePreambleResult shelf;
+  shelf.action = action;
+  if (action == ReadwisePreambleResult::Action::FilterAuthor) {
+    snprintf(shelf.author, sizeof(shelf.author), "%s", doc.author);
+  }
+  setResult(ActivityResult{std::move(shelf)});
+  finish();
+}
+
+void ReadwisePreambleActivity::loadNote() {
+  noteBuf[0] = '\0';
+  readwise::NullReadwiseApi api;
+  readwise::SdReadwiseFileStore store;
+  auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
+  if (engine) {
+    engine->readNote(documentId, noteBuf, sizeof(noteBuf));
+  }
+}
+
+void ReadwisePreambleActivity::showEntryMenu() {
+  if (!loaded || optionPopup.isActive()) {
+    return;
+  }
+  const char* labels[4] = {};
+  menuActionCount = ReadwiseUi::fillReadwiseEntryMenu(doc.author, labels, menuActions, 4);
+  if (menuActionCount == 0) {
+    return;
+  }
+  const char* title = doc.title[0] != '\0' ? doc.title : tr(STR_READWISE_LIBRARY);
+  optionPopup.show(title, labels, menuActionCount, 0, [this](const int selected) {
+    if (selected < 0 || selected >= menuActionCount) {
+      return;
+    }
+    switch (menuActions[selected]) {
+      case ReadwiseUi::ReadwiseEntryAction::Archive:
+        finishWith(ReadwisePreambleResult::Action::Archive);
+        break;
+      case ReadwiseUi::ReadwiseEntryAction::Delete: {
+        const std::string heading = std::string(tr(STR_DELETE)) + "? ";
+        auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, doc.title);
+        if (!confirmation) {
+          LOG_ERR("RWPRE", "OOM: delete confirmation");
+          return;
+        }
+        startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            finishWith(ReadwisePreambleResult::Action::Delete);
+          }
+        });
+        break;
+      }
+      case ReadwiseUi::ReadwiseEntryAction::Comment:
+        startComment();
+        break;
+      case ReadwiseUi::ReadwiseEntryAction::Author:
+        finishWith(ReadwisePreambleResult::Action::FilterAuthor);
+        break;
+    }
+  });
+  requestUpdate();
+}
+
+void ReadwisePreambleActivity::startComment() {
+  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_READWISE_COMMENT), noteBuf,
+                                                           readwise::ReadwiseSyncEngine::NOTE_CAP - 1);
+  if (!keyboard) {
+    LOG_ERR("RWPRE", "OOM: comment keyboard");
+    return;
+  }
+  startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
+    if (result.isCancelled) {
+      return;
+    }
+    const auto* entered = std::get_if<KeyboardResult>(&result.data);
+    if (entered == nullptr) {
+      return;
+    }
+    readwise::NullReadwiseApi api;
+    readwise::SdReadwiseFileStore store;
+    auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
+    if (!engine || !engine->writeNote(documentId, entered->text.c_str())) {
+      LOG_ERR("RWPRE", "Could not save note");
+      return;
+    }
+    loadNote();
+    rebuildRows();
+    requestUpdate();
+  });
 }

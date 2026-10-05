@@ -8,10 +8,11 @@
 
 // The append-safe pending-action journal.
 //
-// Only operations the API demonstrably honours are ever queued: SetLocation and
-// SetSeen. Phase 1 verified that PATCH /update/ answers 200 for
+// Only operations the API demonstrably honours are ever queued: SetLocation,
+// SetSeen, and Delete. Phase 1 verified that PATCH /update/ answers 200 for
 // reading_progress and silently discards it, so reading position is local-only
-// state and never enters this queue.
+// state and never enters this queue. A document note is a local file, not an
+// entry here: the fixed record has no room for the text.
 
 namespace readwise {
 

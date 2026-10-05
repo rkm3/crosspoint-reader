@@ -85,9 +85,9 @@ class ReadwiseApi {
   // Fetches one page and streams its documents to `sink`.
   virtual ListResponse fetchPage(const ListQuery& query, DocumentSink& sink) = 0;
 
-  // Applies one pending operation. Only SetLocation and SetSeen are ever
-  // queued: PATCH /update/ answers 200 for reading_progress and silently
-  // discards it, so progress is never pushed.
+  // Applies one pending operation. SetLocation and SetSeen are PATCH /update/.
+  // Delete is DELETE /delete/. PATCH answers 200 for reading_progress and
+  // silently discards it, so progress is never pushed.
   //
   // Note that a 200 is not evidence a field was written -- the endpoint returns
   // 200 for fields it ignores -- so an implementation that needs certainty must

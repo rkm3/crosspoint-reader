@@ -110,6 +110,19 @@ bool buildUpdateUrl(const char* id, char* out, size_t outCap) {
   return true;
 }
 
+bool buildDeleteUrl(const char* id, char* out, size_t outCap) {
+  if (id == nullptr || id[0] == '\0') {
+    return false;
+  }
+  size_t pos = 0;
+  if (!appendLiteral(out, outCap, pos, API_BASE) || !appendLiteral(out, outCap, pos, "/delete/") ||
+      !appendEncoded(out, outCap, pos, id) || !appendLiteral(out, outCap, pos, "/")) {
+    return false;
+  }
+  out[pos] = '\0';
+  return true;
+}
+
 bool buildUpdateBody(const PendingOp& op, char* out, size_t outCap) {
   if (op.op == OpType::SetSeen) {
     const int written = snprintf(out, outCap, "{\"seen\":%s}", op.payload != 0 ? "true" : "false");
