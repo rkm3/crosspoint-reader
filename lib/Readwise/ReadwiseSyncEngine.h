@@ -85,6 +85,20 @@ struct SyncOutcome {
   uint16_t retained = 0;
 };
 
+// Per-category totals. `named` is indexed by Category for the dense prefix
+// Article..Epub. Unknown, and any value appended later, accumulates in `other`.
+struct CategoryCounts {
+  uint16_t total = 0;
+  uint16_t unread = 0;
+  uint16_t onDevice = 0;
+};
+
+struct LibraryCounts {
+  static constexpr int kNamedCategories = 9;
+  CategoryCounts named[kNamedCategories]{};
+  CategoryCounts other{};
+};
+
 class ReadwiseSyncEngine {
  public:
   ReadwiseSyncEngine(ReadwiseApi& api, ReadwiseFileStore& store, std::string baseDir);
@@ -120,6 +134,10 @@ class ReadwiseSyncEngine {
   // Linear scan of docs.bin for one document. Used when a managed body path is
   // reopened (e.g. resume after restart) and the UI needs its metadata back.
   bool findDocument(const char* id, Document& out);
+
+  // One pass over docs.bin. Queued `seen` ops count as read. `onDevice` is
+  // FLAG_HAS_BODY. Returns false when docs.bin is missing or unreadable.
+  bool collectLibraryCounts(LibraryCounts& out);
 
   // Downloads the body of every cached document that lacks one, so that after
   // a sync the entire library reads offline. Runs after the metadata stages;

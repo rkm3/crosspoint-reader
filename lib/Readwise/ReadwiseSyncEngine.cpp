@@ -718,6 +718,52 @@ bool ReadwiseSyncEngine::rebuildLocal() {
   return writeIndexes(indexEntries);
 }
 
+bool ReadwiseSyncEngine::collectLibraryCounts(LibraryCounts& out) {
+  static_assert(static_cast<int>(Category::Article) == 0, "named slots are indexed by Category");
+  static_assert(static_cast<int>(Category::Epub) + 1 == LibraryCounts::kNamedCategories,
+                "Article..Epub must stay a dense prefix");
+
+  out = LibraryCounts();
+  // A missing or unreadable journal just means no queued overrides. The cached
+  // library is still worth counting.
+  journal_.load();
+
+  DocsHeader header;
+  uint8_t headerBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, headerBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(headerBuffer, DOCS_HEADER_SIZE, header)) {
+    return false;
+  }
+
+  uint32_t offset = DOCS_HEADER_SIZE;
+  for (uint16_t i = 0; i < header.recordCount; ++i) {
+    const int read = store_.readRange(docsPath(), offset, recordBuffer_, MAX_ENCODED_RECORD);
+    if (read <= 0) {
+      return false;
+    }
+    size_t consumed = 0;
+    if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed) || consumed == 0) {
+      return false;
+    }
+    applyQueuedOverrides(scratchDoc_);
+
+    CategoryCounts* bucket = &out.other;
+    const auto index = static_cast<uint8_t>(scratchDoc_.category);
+    if (index < LibraryCounts::kNamedCategories) {
+      bucket = &out.named[index];
+    }
+    bucket->total++;
+    if ((scratchDoc_.flags & FLAG_SEEN) == 0) {
+      bucket->unread++;
+    }
+    if ((scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
+      bucket->onDevice++;
+    }
+    offset += static_cast<uint32_t>(consumed);
+  }
+  return true;
+}
+
 bool ReadwiseSyncEngine::findDocument(const char* id, Document& out) {
   if (id == nullptr || id[0] == '\0') {
     return false;

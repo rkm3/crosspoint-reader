@@ -8,24 +8,29 @@
 #include <string>
 #include <vector>
 
-#include "activities/UiListActivity.h"
+#include "activities/UiTabListActivity.h"
 
 /**
  * Offline browser for the synced Readwise locations.
  *
- * Reads only the local index and metadata files -- no network. Row 0 is the
- * "Sync now" entry (which pushes ReadwiseSyncActivity); document rows open the
- * cached body, or download it on demand when absent. A long Confirm press
- * queues an archive, which takes effect locally immediately via
- * rebuildLocal().
+ * Reads only the local index and metadata files -- no network. Later,
+ * Shortlist, and Feed are tabs; each keeps its own selection and scroll.
+ * Row 0 is "Sync now" (which pushes ReadwiseSyncActivity). A document row
+ * opens a preamble; Confirm there opens the cached body or downloads it.
+ * A long Confirm press queues an archive, which takes effect locally
+ * immediately via rebuildLocal().
  *
  * Only one visible window of metadata is resident at a time: documents are
  * ~800 bytes each and a full 100-document cap would be ~80 KB.
  */
-class ReadwiseLibraryActivity final : public UiListActivity {
+class ReadwiseLibraryActivity final : public UiTabListActivity {
  public:
   explicit ReadwiseLibraryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : UiListActivity("ReadwiseLibrary", renderer, mappedInput, true) {}
+      : UiTabListActivity("ReadwiseLibrary", renderer, mappedInput, true) {
+    // Three short labels. A full-slot pill would stretch across a third of
+    // the screen; cap the pill and leave the equal-width slots where they are.
+    tabPillMaxPad = 16;
+  }
 
   void onEnter() override;
   void onExit() override;
@@ -50,9 +55,15 @@ class ReadwiseLibraryActivity final : public UiListActivity {
   void onRowLongPress(int index) override;
   bool handleCustomInput() override;
   bool handleButtons() override;
-  void drawChrome() override;
+  const char* headerTitle() const override;
   void drawFooter() override;
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
+
+  int tabCount() const override { return LOCATION_COUNT; }
+  int activeTab() const override { return locationIndex; }
+  const char* tabLabel(int index) const override;
+  void onTabAction(int index) override;
+  void stepTab(int direction) override;
 
   void reloadCounts();
   void ensureWindow(int docIndex);
@@ -67,9 +78,12 @@ class ReadwiseLibraryActivity final : public UiListActivity {
   // of switching to that view. Returns true while the button is held, so the
   // caller swallows the frame.
   bool handleLocationHold(MappedInputManager::Button button, int targetIndex);
+  void selectTab(int index);
   void jumpToLocation(int index);
   // Persists locationIndex so Back out of an article returns to this view.
   void rememberLocation();
+  // List row under the tab band. -1 when the band itself is focused.
+  int selectedRow() const { return ringPos() - 1; }
   // Direct-jump targets for the Left/Right buttons: from Later they lead to
   // Shortlist and Feed; from Shortlist or Feed the button for the current view
   // leads back to Later. The hint labels name the destination view.
@@ -82,20 +96,22 @@ class ReadwiseLibraryActivity final : public UiListActivity {
   std::unique_ptr<readwise::ReadwiseSyncEngine> engine;
 
   State state = State::LIST;
-  // Composed "Library - Later" title. drawChrome fills it; the popup states
-  // use the plain library name instead.
-  char headerBuf[96] = {};
 
-  // The library views, jumped between with Left/Right. Index 0 (Later) is the
-  // default; leftTargetIndex/rightTargetIndex encode the button mapping.
-  static constexpr readwise::Location LOCATIONS[] = {readwise::Location::Later, readwise::Location::Shortlist,
-                                                     readwise::Location::Feed};
+  // The library views. Index 0 (Later) is the default; leftTargetIndex and
+  // rightTargetIndex encode the button mapping on boards that have Left/Right.
+  static constexpr int LOCATION_COUNT = 3;
+  static constexpr readwise::Location LOCATIONS[LOCATION_COUNT] = {
+      readwise::Location::Later, readwise::Location::Shortlist, readwise::Location::Feed};
   int locationIndex = 0;
   uint16_t docCount = 0;
 
   // Sliding metadata window backing the visible rows.
   std::vector<readwise::Document> window;
   int windowStart = 0;
+
+  // One scratch string for the row value (word count and date). list() reads
+  // the pointer before it asks for the next row.
+  char rowValue[32] = {};
 
   // Set when a download is pending/failed; the id of the document involved.
   std::string pendingDownloadId;

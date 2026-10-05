@@ -763,3 +763,38 @@ TEST(ReadwiseSync, CompletedSweepExpiresMissingDocuments) {
   ASSERT_EQ(page.size(), 1u);
   EXPECT_STREQ(page[0].id, "doc1");
 }
+
+TEST(ReadwiseSync, LibraryCountsGroupCategoryUnreadAndOnDevice) {
+  Fixture f;
+  auto unread = makeDoc("a1", Location::Later, kT1, kT1);
+  auto seen = makeDoc("a2", Location::Later, kT2, kT2);
+  seen.flags = FLAG_SEEN;
+  auto email = makeDoc("e1", Location::Later, kT3, kT3);
+  email.category = Category::Email;
+  f.api.pages.push_back({{unread, seen, email}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_TRUE(f.engine.setBodyCached("a1", true));
+  ASSERT_TRUE(f.engine.queueSeen("e1", kT3));
+
+  // A fresh engine has to reload the journal; the queued seen must still count.
+  ReadwiseSyncEngine again(f.api, f.store, kBase);
+  LibraryCounts counts;
+  ASSERT_TRUE(again.collectLibraryCounts(counts));
+
+  const auto article = static_cast<int>(Category::Article);
+  const auto emailSlot = static_cast<int>(Category::Email);
+  EXPECT_EQ(counts.named[article].total, 2);
+  EXPECT_EQ(counts.named[article].unread, 1);
+  EXPECT_EQ(counts.named[article].onDevice, 1);
+  EXPECT_EQ(counts.named[emailSlot].total, 1);
+  EXPECT_EQ(counts.named[emailSlot].unread, 0);
+  EXPECT_EQ(counts.named[emailSlot].onDevice, 0);
+  EXPECT_EQ(counts.named[static_cast<int>(Category::Rss)].total, 0);
+  EXPECT_EQ(counts.other.total, 0);
+}
+
+TEST(ReadwiseSync, LibraryCountsMissingFile) {
+  Fixture f;
+  LibraryCounts counts;
+  EXPECT_FALSE(f.engine.collectLibraryCounts(counts));
+}

@@ -11,11 +11,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <iterator>
 
 #include "CrossPointState.h"
 #include "ReadwiseCredentialStore.h"
 #include "ReadwiseImageFetcher.h"
+#include "ReadwisePreambleActivity.h"
 #include "ReadwiseSupport.h"
 #include "ReadwiseSyncActivity.h"
 #include "SilentRestart.h"
@@ -43,6 +43,19 @@ const char* locationLabel(const readwise::Location location) {
     default:
       return tr(STR_READWISE_LATER);
   }
+}
+
+// Fits the list value slot: 1200 -> "1.2k", under 1000 stays a plain number.
+void formatCompactCount(char* buf, const size_t cap, const uint32_t count) {
+  if (count < 1000) {
+    snprintf(buf, cap, "%lu", static_cast<unsigned long>(count));
+    return;
+  }
+  const uint32_t scale = count < 1000000u ? 1000u : 1000000u;
+  const char suffix = count < 1000000u ? 'k' : 'M';
+  const uint32_t whole = count / scale;
+  const uint32_t frac = (count % scale) / (scale / 10u);
+  snprintf(buf, cap, "%lu.%lu%c", static_cast<unsigned long>(whole), static_cast<unsigned long>(frac), suffix);
 }
 }  // namespace
 
@@ -83,7 +96,17 @@ void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
 }
 
 void ReadwiseLibraryActivity::onEnter() {
-  UiListActivity::onEnter();
+  // Restore the shelf before the base onEnter, which resets the active tab's
+  // nav. activeTab() is locationIndex.
+  constexpr auto locationCount = static_cast<uint8_t>(LOCATION_COUNT);
+  locationIndex =
+      APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
+  UiTabListActivity::onEnter();
+  // Every shelf starts on Sync now, matching the old single-list selection.
+  // Switching away and back keeps that tab's later scroll position.
+  for (auto& tab : tabNavs) {
+    tab.reset(1);
+  }
   engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(nullApi, store, ReadwiseCredentialStore::getDataDir());
   if (!engine) {
     LOG_ERR("RWLIB", "OOM: sync engine; library will show empty");
@@ -95,11 +118,6 @@ void ReadwiseLibraryActivity::onEnter() {
     engine->rebuildLocal();
   }
   migrateLegacyTextBodies();
-  // Return to the view the last article was opened from rather than always
-  // Later -- including after the restart that an uncached open performs.
-  constexpr auto locationCount = static_cast<uint8_t>(std::size(LOCATIONS));
-  locationIndex =
-      APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   state = State::LIST;
   // Entered by a Back press that is very likely still held; see the member.
   ignoreBackUntilReleased = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -136,14 +154,16 @@ void ReadwiseLibraryActivity::reloadCounts() {
   docCount = engine ? engine->indexCount(LOCATIONS[locationIndex]) : 0;
   window.clear();
   windowStart = 0;
-  int selected = nav.selected.load();
-  if (selected >= totalRows()) {
-    selected = totalRows() - 1;
+  auto& n = activeNav();
+  int selected = n.selected.load();
+  const int ringSize = totalRows() + 1;
+  if (selected >= ringSize) {
+    selected = ringSize - 1;
   }
   if (selected < 0) {
     selected = 0;
   }
-  nav.selected.store(selected);
+  n.selected.store(selected);
 }
 
 void ReadwiseLibraryActivity::ensureWindow(const int docIndex) {
@@ -169,11 +189,38 @@ const readwise::Document* ReadwiseLibraryActivity::docAt(const int docIndex) {
   return &window[static_cast<size_t>(rel)];
 }
 
-void ReadwiseLibraryActivity::jumpToLocation(const int index) {
+void ReadwiseLibraryActivity::selectTab(const int index) {
+  if (index < 0 || index >= LOCATION_COUNT || index == locationIndex) {
+    return;
+  }
   locationIndex = index;
-  nav.reset(0);
   reloadCounts();
   requestUpdate();
+}
+
+void ReadwiseLibraryActivity::jumpToLocation(const int index) { selectTab(index); }
+
+const char* ReadwiseLibraryActivity::tabLabel(const int index) const {
+  if (index < 0 || index >= LOCATION_COUNT) {
+    return "";
+  }
+  return locationLabel(LOCATIONS[index]);
+}
+
+void ReadwiseLibraryActivity::onTabAction(const int index) {
+  app.clearTapFlash();
+  selectTab(index);
+}
+
+void ReadwiseLibraryActivity::stepTab(const int direction) {
+  int next = locationIndex + (direction >= 0 ? 1 : -1);
+  if (next >= LOCATION_COUNT) {
+    next = 0;
+  }
+  if (next < 0) {
+    next = LOCATION_COUNT - 1;
+  }
+  selectTab(next);
 }
 
 bool ReadwiseLibraryActivity::handleCustomInput() {
@@ -242,8 +289,8 @@ bool ReadwiseLibraryActivity::handleButtons() {
   // Checking held time on release instead looked equivalent but never
   // triggered in the hand.
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-    if (!holdActionTriggered && nav.selected.load() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
-      const readwise::Document* doc = docAt(nav.selected.load() - 1);
+    if (!holdActionTriggered && selectedRow() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+      const readwise::Document* doc = docAt(selectedRow() - 1);
       if (doc != nullptr) {
         holdActionTriggered = true;  // suppress the release below
         queueMove(*doc, readwise::Location::Archive);
@@ -257,7 +304,11 @@ bool ReadwiseLibraryActivity::handleButtons() {
       holdActionTriggered = false;  // the hold already acted
       return true;
     }
-    const int selected = nav.selected.load();
+    if (ringPos() == 0) {
+      stepTab(1);
+      return true;
+    }
+    const int selected = selectedRow();
     if (selected >= 0 && selected < listCount()) {
       activateIndex(selected);
     }
@@ -276,7 +327,23 @@ void ReadwiseLibraryActivity::activateIndex(const int index) {
   if (doc == nullptr) {
     return;
   }
-  openDocument(*doc);
+  const int docIndex = index - 1;
+  auto preamble = makeUniqueNoThrow<ReadwisePreambleActivity>(renderer, mappedInput, doc->id);
+  if (!preamble) {
+    LOG_ERR("RWLIB", "OOM: preamble");
+    return;
+  }
+  startActivityForResult(std::move(preamble), [this, docIndex](const ActivityResult& result) {
+    if (result.isCancelled) {
+      return;
+    }
+    const readwise::Document* opened = docAt(docIndex);
+    if (opened == nullptr) {
+      LOG_ERR("RWLIB", "Opened article left the shelf");
+      return;
+    }
+    openDocument(*opened);
+  });
 }
 
 void ReadwiseLibraryActivity::onRowLongPress(const int index) {
@@ -449,8 +516,8 @@ bool ReadwiseLibraryActivity::handleLocationHold(const MappedInputManager::Butto
   // Feed is server-side content rather than a shelf, so it is a view you can
   // switch to but never a destination you can send an article to.
   const bool movable = target == readwise::Location::Later || target == readwise::Location::Shortlist;
-  if (movable && !holdActionTriggered && nav.selected.load() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
-    const readwise::Document* doc = docAt(nav.selected.load() - 1);
+  if (movable && !holdActionTriggered && selectedRow() > 0 && mappedInput.getHeldTime() >= HOLD_ACTION_MS) {
+    const readwise::Document* doc = docAt(selectedRow() - 1);
     if (doc != nullptr) {
       holdActionTriggered = true;  // suppress the release that follows
       queueMove(*doc, target);
@@ -475,7 +542,7 @@ void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const rea
 
 void ReadwiseLibraryActivity::render(RenderLock&& lock) {
   if (state == State::LIST) {
-    UiListActivity::render(std::move(lock));
+    UiTabListActivity::render(std::move(lock));
     return;
   }
 
@@ -495,11 +562,7 @@ void ReadwiseLibraryActivity::render(RenderLock&& lock) {
   renderer.displayBuffer();
 }
 
-void ReadwiseLibraryActivity::drawChrome() {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  snprintf(headerBuf, sizeof(headerBuf), "%s - %s", tr(STR_READWISE_LIBRARY), locationLabel(LOCATIONS[locationIndex]));
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, headerBuf);
-}
+const char* ReadwiseLibraryActivity::headerTitle() const { return tr(STR_READWISE_LIBRARY); }
 
 void ReadwiseLibraryActivity::drawFooter() {
   // The Left/Right hints name the destination view, so the button for the
@@ -525,16 +588,27 @@ void ReadwiseLibraryActivity::provideRow(void* ctx, const uint16_t index, fui::L
   if (item.subtitle != nullptr && item.subtitle[0] == '\0') {
     item.subtitle = nullptr;
   }
+  // One right-hand slot. A missing body keeps the download marker; a cached
+  // body shows the compact count and the shelf date (first 10 of lastMovedAt).
   if ((doc->flags & readwise::FLAG_HAS_BODY) == 0) {
     item.value = tr(STR_READWISE_NOT_DOWNLOADED);
+    return;
   }
+  char count[8];
+  formatCompactCount(count, sizeof(count), doc->wordCount);
+  if (doc->lastMovedAt[0] != '\0') {
+    snprintf(self->rowValue, sizeof(self->rowValue), "%s · %.10s", count, doc->lastMovedAt);
+  } else {
+    snprintf(self->rowValue, sizeof(self->rowValue), "%s", count);
+  }
+  item.value = self->rowValue;
 }
 
 void ReadwiseLibraryActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
                                                 static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  buildTabBar(screen);
 
   fui::ListProps props;
   props.rowProvider = &ReadwiseLibraryActivity::provideRow;
@@ -548,11 +622,11 @@ void ReadwiseLibraryActivity::buildScreen(UiScreen& screen) {
   props.labelText = label;
   props.subtitleText = screen.theme().smallText;
   props.subtitleText.maxLines = 1;
-  syncListViewport(screen, props);
+  syncTabListViewport(screen, props);
   // The provider reads the metadata window. Load the first visible document
   // before layout so a page that fits in one window does not hit the card
   // once per row.
-  const int firstDoc = nav.top > 0 ? nav.top - 1 : 0;
+  const int firstDoc = activeNav().top > 0 ? activeNav().top - 1 : 0;
   ensureWindow(firstDoc);
   screen.list(props);
   if (docCount == 0) {

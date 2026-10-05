@@ -6,12 +6,16 @@
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <NullReadwiseApi.h>
 #include <PNGdec.h>
+#include <ReadwiseSyncEngine.h>
+#include <SdReadwiseFileStore.h>
 #include <Xtc.h>
 
 #include <algorithm>
@@ -23,6 +27,8 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "ReadwiseCredentialStore.h"
+#include "SleepCalendar.h"
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -508,6 +514,298 @@ bool drawSleepPopupPreservingFrame(GfxRenderer& renderer) {
   return true;
 }
 
+const StrId kMonthNames[] = {StrId::STR_MONTH_JANUARY, StrId::STR_MONTH_FEBRUARY, StrId::STR_MONTH_MARCH,
+                             StrId::STR_MONTH_APRIL,   StrId::STR_MONTH_MAY,      StrId::STR_MONTH_JUNE,
+                             StrId::STR_MONTH_JULY,    StrId::STR_MONTH_AUGUST,   StrId::STR_MONTH_SEPTEMBER,
+                             StrId::STR_MONTH_OCTOBER, StrId::STR_MONTH_NOVEMBER, StrId::STR_MONTH_DECEMBER};
+const StrId kWeekdayNames[] = {StrId::STR_CAL_SUN, StrId::STR_CAL_MON, StrId::STR_CAL_TUE, StrId::STR_CAL_WED,
+                               StrId::STR_CAL_THU, StrId::STR_CAL_FRI, StrId::STR_CAL_SAT};
+
+const char* categoryLabel(const readwise::Category category) {
+  switch (category) {
+    case readwise::Category::Article:
+      return tr(STR_READWISE_CAT_ARTICLE);
+    case readwise::Category::Rss:
+      return tr(STR_READWISE_CAT_RSS);
+    case readwise::Category::Email:
+      return tr(STR_READWISE_CAT_EMAIL);
+    case readwise::Category::Tweet:
+      return tr(STR_READWISE_CAT_TWEET);
+    case readwise::Category::Pdf:
+      return tr(STR_READWISE_CAT_PDF);
+    case readwise::Category::Video:
+      return tr(STR_READWISE_CAT_VIDEO);
+    case readwise::Category::Highlight:
+      return tr(STR_READWISE_CAT_HIGHLIGHT);
+    case readwise::Category::Note:
+      return tr(STR_READWISE_CAT_NOTE);
+    case readwise::Category::Epub:
+      return tr(STR_READWISE_CAT_EPUB);
+    case readwise::Category::Unknown:
+      break;
+  }
+  return tr(STR_READWISE_CAT_UNKNOWN);
+}
+
+struct CalendarDate {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int firstWeekday = 0;
+  int days = 0;
+  int weeks = 0;
+};
+
+bool readCalendarDate(CalendarDate& out) {
+  // PNGdec's zutil.h defines `local` as `static`, so this cannot be named that.
+  struct tm now = {};
+  if (!halClock.localTime(now)) return false;
+  const int year = now.tm_year + 1900;
+  // An unsynced RTC often reports a year near the epoch. A calendar for that
+  // date would look broken, so the logo screen stays up until the clock is real.
+  if (year < 2020 || year > 2099) return false;
+  const int month = now.tm_mon + 1;
+  const int day = now.tm_mday;
+  const int days = daysInMonth(year, month);
+  if (month < 1 || month > 12 || day < 1 || day > days) return false;
+
+  out.year = year;
+  out.month = month;
+  out.day = day;
+  out.days = days;
+  out.firstWeekday = weekdayOfFirst(day, now.tm_wday);
+  out.weeks = weeksInMonth(out.firstWeekday, days);
+  return out.weeks > 0;
+}
+
+bool libraryHasCounts(const readwise::LibraryCounts& counts) {
+  for (const readwise::CategoryCounts& row : counts.named) {
+    if (row.total > 0) return true;
+  }
+  return counts.other.total > 0;
+}
+
+// Heap, not stack: the engine's scratch document is ~800 bytes and the counts
+// struct is another hundred. Both die before the framebuffer is painted.
+std::unique_ptr<readwise::LibraryCounts> loadSleepLibraryCounts() {
+  readwise::NullReadwiseApi api;
+  readwise::SdReadwiseFileStore store;
+  auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
+  if (!engine) {
+    LOG_ERR("SLP", "OOM: library stats engine");
+    return nullptr;
+  }
+  auto counts = makeUniqueNoThrow<readwise::LibraryCounts>();
+  if (!counts) {
+    LOG_ERR("SLP", "OOM: library stats");
+    return nullptr;
+  }
+  if (!engine->collectLibraryCounts(*counts) || !libraryHasCounts(*counts)) {
+    return nullptr;
+  }
+  return counts;
+}
+
+void drawTextCentered(const GfxRenderer& renderer, const int fontId, const int x, const int y, const int w, const int h,
+                      const char* text, const bool black) {
+  if (text == nullptr || text[0] == '\0' || w <= 0 || h <= 0) return;
+  const int textWidth = renderer.getTextWidth(fontId, text);
+  const int textHeight = renderer.getLineHeight(fontId);
+  const auto clip = renderer.getClipRect();
+  renderer.setClipRect(x, y, w, h);
+  renderer.drawText(fontId, x + (w - textWidth) / 2, y + (h - textHeight) / 2, text, black);
+  renderer.setClipRect(clip[0], clip[1], clip[2], clip[3]);
+}
+
+void drawTextRight(const GfxRenderer& renderer, const int fontId, const int right, const int y, const char* text,
+                   const bool black) {
+  if (text == nullptr || text[0] == '\0') return;
+  renderer.drawText(fontId, right - renderer.getTextWidth(fontId, text), y, text, black);
+}
+
+int countStatRows(const readwise::LibraryCounts& counts) {
+  int rows = 0;
+  for (const readwise::CategoryCounts& row : counts.named) {
+    if (row.total > 0) ++rows;
+  }
+  if (counts.other.total > 0) ++rows;
+  return rows;
+}
+
+void drawStatRow(const GfxRenderer& renderer, const int fontId, const int x, const int y, const int nameW,
+                 const int ratioRight, const int deviceRight, const char* name, const readwise::CategoryCounts& row) {
+  const int lineH = renderer.getLineHeight(fontId);
+  const auto clip = renderer.getClipRect();
+  renderer.setClipRect(x, y, std::max(nameW, 0), lineH);
+  renderer.drawText(fontId, x, y, name, true);
+  renderer.setClipRect(clip[0], clip[1], clip[2], clip[3]);
+
+  char ratio[16];
+  snprintf(ratio, sizeof(ratio), "%u / %u", static_cast<unsigned>(row.total), static_cast<unsigned>(row.unread));
+  drawTextRight(renderer, fontId, ratioRight, y, ratio, true);
+
+  char onDevice[8];
+  snprintf(onDevice, sizeof(onDevice), "%u", static_cast<unsigned>(row.onDevice));
+  drawTextRight(renderer, fontId, deviceRight, y, onDevice, true);
+}
+
+void drawLibraryStats(const GfxRenderer& renderer, const readwise::LibraryCounts& counts, const int x, const int y,
+                      const int width, const int height) {
+  const int fontId = UI_10_FONT_ID;
+  const int lineH = renderer.getLineHeight(fontId);
+  if (lineH <= 0 || width < 40 || height < lineH * 2) return;
+
+  const char* ratioHeader = tr(STR_SLEEP_TOTAL_UNREAD);
+  const char* deviceHeader = tr(STR_SLEEP_ON_DEVICE);
+  int ratioCol = renderer.getTextWidth(fontId, ratioHeader);
+  int deviceCol = renderer.getTextWidth(fontId, deviceHeader);
+  char widest[16];
+  snprintf(widest, sizeof(widest), "%u / %u", 65535u, 65535u);
+  ratioCol = std::max(ratioCol, renderer.getTextWidth(fontId, widest));
+  deviceCol = std::max(deviceCol, renderer.getTextWidth(fontId, "65535"));
+
+  constexpr int kColGap = 18;
+  const int nameW = width - ratioCol - deviceCol - kColGap * 2;
+  const int ratioRight = x + std::max(nameW, 0) + kColGap + ratioCol;
+  const int deviceRight = x + width;
+
+  int cursor = y;
+  const int bottom = y + height;
+  renderer.drawText(fontId, x, cursor, tr(STR_READWISE_LIBRARY), true, EpdFontFamily::BOLD);
+  cursor += lineH + 6;
+  if (cursor + lineH > bottom) return;
+
+  drawTextRight(renderer, fontId, ratioRight, cursor, ratioHeader, true);
+  drawTextRight(renderer, fontId, deviceRight, cursor, deviceHeader, true);
+  cursor += lineH + 4;
+  renderer.drawLine(x, cursor, x + width, cursor, true);
+  cursor += 6;
+
+  auto paint = [&](const char* name, const readwise::CategoryCounts& row) {
+    if (row.total == 0 || cursor + lineH > bottom) return;
+    drawStatRow(renderer, fontId, x, cursor, nameW, ratioRight, deviceRight, name, row);
+    cursor += lineH + 4;
+  };
+
+  for (int i = 0; i < readwise::LibraryCounts::kNamedCategories; ++i) {
+    paint(categoryLabel(static_cast<readwise::Category>(i)), counts.named[i]);
+  }
+  paint(tr(STR_READWISE_CAT_UNKNOWN), counts.other);
+}
+
+void drawCalendarPage(const GfxRenderer& renderer, const CalendarDate& date, const readwise::LibraryCounts* counts) {
+  int top = 0;
+  int right = 0;
+  int bottom = 0;
+  int left = 0;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  constexpr int kPad = 16;
+  const int x0 = left + kPad;
+  const int y0 = top + kPad;
+  const int x1 = renderer.getScreenWidth() - right - kPad;
+  const int y1 = renderer.getScreenHeight() - bottom - kPad;
+  const int areaW = x1 - x0;
+  const int areaH = y1 - y0;
+  if (areaW < kCalendarWeekdays * 16 || areaH < 80) return;
+
+  const int titleFont = UI_12_FONT_ID;
+  const int labelFont = UI_10_FONT_ID;
+  const int titleH = std::max(renderer.getLineHeight(titleFont), 1);
+  const int labelH = std::max(renderer.getLineHeight(labelFont), 1);
+  const bool hasStats = counts != nullptr;
+  const int statRows = hasStats ? countStatRows(*counts) : 0;
+  const bool sideBySide = areaW > areaH + 40;
+
+  // Title, time, gap, weekday labels, gap, then the day grid.
+  const int chromeH = titleH + 4 + labelH + 16 + labelH + 8;
+  const int statsBlockH = hasStats ? (labelH + 6 + labelH + 4 + 6 + statRows * (labelH + 4) + 8) : 0;
+
+  int cellLimitW = sideBySide && hasStats ? areaW * 56 / 100 : areaW;
+  int cell = cellLimitW / kCalendarWeekdays;
+  int verticalBudget = areaH - chromeH - (sideBySide ? 0 : statsBlockH + (hasStats ? 24 : 0));
+  if (verticalBudget < date.weeks) verticalBudget = date.weeks;
+  cell = std::min(cell, verticalBudget / date.weeks);
+  if (cell > 72) cell = 72;
+  if (cell < 20) cell = 20;
+  if (cell * kCalendarWeekdays > areaW) cell = areaW / kCalendarWeekdays;
+
+  const int gridW = cell * kCalendarWeekdays;
+  const int gridH = cell * date.weeks;
+  const int calH = chromeH + gridH;
+
+  int originX = x0 + (areaW - gridW) / 2;
+  int originY = y0 + std::max(0, (areaH - calH - (sideBySide ? 0 : statsBlockH + (hasStats ? 24 : 0))) / 2);
+  if (sideBySide && hasStats) {
+    originX = x0;
+    originY = y0 + std::max(0, (areaH - calH) / 2);
+  }
+
+  char title[48];
+  snprintf(title, sizeof(title), "%s %d", I18N.get(kMonthNames[date.month - 1]), date.year);
+  const int titleW = renderer.getTextWidth(titleFont, title, EpdFontFamily::BOLD);
+  renderer.drawText(titleFont, originX + (gridW - titleW) / 2, originY, title, true, EpdFontFamily::BOLD);
+
+  char timeBuf[12];
+  int cursorY = originY + titleH + 4;
+  if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockFormat == 1)) {
+    const int timeW = renderer.getTextWidth(labelFont, timeBuf);
+    renderer.drawText(labelFont, originX + (gridW - timeW) / 2, cursorY, timeBuf, true);
+  }
+  cursorY += labelH + 16;
+
+  for (int weekday = 0; weekday < kCalendarWeekdays; ++weekday) {
+    drawTextCentered(renderer, labelFont, originX + weekday * cell, cursorY, cell, labelH,
+                     I18N.get(kWeekdayNames[weekday]), true);
+  }
+  cursorY += labelH + 4;
+  renderer.drawLine(originX, cursorY, originX + gridW, cursorY, true);
+  cursorY += 4;
+
+  const int dayFont = cell >= 40 ? UI_12_FONT_ID : labelFont;
+  const int dayH = std::max(renderer.getLineHeight(dayFont), 1);
+  const int numberWidth = renderer.getTextWidth(dayFont, "30");
+  int mark = std::max(numberWidth + 14, dayH + 10);
+  if (mark > cell - 2) mark = cell - 2;
+  if (mark < 16) mark = 16;
+
+  for (int week = 0; week < date.weeks; ++week) {
+    for (int weekday = 0; weekday < kCalendarWeekdays; ++weekday) {
+      const int dayNumber = week * kCalendarWeekdays + weekday - date.firstWeekday + 1;
+      if (dayNumber < 1 || dayNumber > date.days) continue;
+
+      const int cellX = originX + weekday * cell;
+      const int cellY = cursorY + week * cell;
+      const bool today = dayNumber == date.day;
+      if (today) {
+        const int markX = cellX + (cell - mark) / 2;
+        const int markY = cellY + (cell - mark) / 2;
+        renderer.fillRoundedRect(markX, markY, mark, mark, mark / 2, Color::Black);
+      }
+
+      char dayText[4];
+      snprintf(dayText, sizeof(dayText), "%d", dayNumber);
+      drawTextCentered(renderer, dayFont, cellX, cellY, cell, cell, dayText, !today);
+    }
+  }
+
+  if (!hasStats) return;
+
+  const int statsGap = 24;
+  int statsX = originX;
+  int statsY = originY + calH + statsGap;
+  int statsW = gridW;
+  int statsH = y1 - statsY;
+  if (sideBySide) {
+    statsX = originX + gridW + statsGap;
+    statsY = y0;
+    statsW = x1 - statsX;
+    statsH = areaH;
+  }
+  if (statsW > 0 && statsH > 0) {
+    drawLibraryStats(renderer, *counts, statsX, statsY, statsW, statsH);
+  }
+}
+
 void releaseSdFontCachesForDecode(const GfxRenderer& renderer) {
   if (auto* fcm = renderer.getFontCacheManager()) {
     LOG_DBG("SLP", "Free heap before SD font cache release: %d bytes", ESP.getFreeHeap());
@@ -633,7 +931,7 @@ void SleepActivity::renderCustomSleepScreen() const {
 // firmware's only clean refresh in normal operation is the single-pass 0xD7
 // sequence, used once for the sleep image. It never runs the multi-flash GC
 // waveform (0xF7) that FULL_REFRESH selects (#2471's blinking complaint).
-void SleepActivity::renderDefaultSleepScreen() const {
+void SleepActivity::renderLogoSleepScreen() const {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
@@ -641,6 +939,25 @@ void SleepActivity::renderDefaultSleepScreen() const {
   renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
   renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSPOINT), true, EpdFontFamily::BOLD);
   renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_SLEEPING));
+}
+
+bool SleepActivity::renderCalendarSleepScreen() const {
+  CalendarDate date;
+  if (!readCalendarDate(date)) return false;
+
+  // Count while the "going to sleep" popup is still on the glass. The scan is
+  // one streaming pass over docs.bin; the engine is released before paint.
+  const auto counts = loadSleepLibraryCounts();
+
+  renderer.clearScreen();
+  drawCalendarPage(renderer, date, counts.get());
+  return true;
+}
+
+void SleepActivity::renderDefaultSleepScreen() const {
+  if (!renderCalendarSleepScreen()) {
+    renderLogoSleepScreen();
+  }
 
   // Make sleep screen dark unless light is selected in settings
   if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT) {
