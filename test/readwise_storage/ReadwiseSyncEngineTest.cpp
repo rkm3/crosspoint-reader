@@ -358,6 +358,35 @@ TEST(ReadwiseSync, RebuildLocalReflectsQueuedActionsOffline) {
   EXPECT_EQ(reloaded.entries().size(), 1u);
 }
 
+// A queued delete leaves the list immediately, same as a queued archive. The
+// record stays until the server accepts, because an incremental pull cannot
+// see the deletion and a failed push must still have a local copy to retry.
+TEST(ReadwiseSync, RebuildLocalHidesQueuedDelete) {
+  Fixture f;
+  constexpr const char* gone = "01hzzzzzzzzzzzzzzzzzzzzz01";
+  constexpr const char* kept = "01hzzzzzzzzzzzzzzzzzzzzz02";
+  f.api.pages.push_back(
+      {{makeDoc(gone, Location::Later, kT1, kT1), makeDoc(kept, Location::Later, kT2, kT2)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.queueDelete(gone, kT1));
+  ASSERT_TRUE(f.engine.rebuildLocal());
+
+  std::vector<Document> page;
+  ASSERT_TRUE(f.engine.readIndexPage(Location::Later, 0, 10, page));
+  ASSERT_EQ(page.size(), 1u) << "the deleted document must leave the list before any sync";
+  EXPECT_STREQ(page[0].id, kept);
+  EXPECT_EQ(f.engine.indexCount(Location::Later), 1u);
+
+  Document stillThere;
+  EXPECT_TRUE(f.engine.findDocument(gone, stillThere));
+
+  ReadwiseJournal reloaded(f.store, f.engine.journalPath());
+  ASSERT_TRUE(reloaded.load());
+  EXPECT_EQ(reloaded.entries().size(), 1u);
+  EXPECT_EQ(reloaded.entries()[0].op, OpType::Delete);
+}
+
 // Ordinary navigation must not rewrite the cache: an empty journal makes
 // rebuildLocal a no-op with zero durable writes.
 TEST(ReadwiseSync, RebuildLocalWithEmptyJournalWritesNothing) {

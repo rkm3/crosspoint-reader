@@ -819,6 +819,10 @@ void ReadwiseLibraryActivity::pushDelete() {
     LOG_ERR("RWLIB", "Could not queue delete");
     return;
   }
+  // Visible immediately, same as archive: the row leaves the list now, and
+  // the queued op pushes at the next sync (or the attempt below).
+  engine->rebuildLocal();
+  reloadCounts();
   const bool online = READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED &&
                       WiFi.localIP() != IPAddress(0, 0, 0, 0);
   if (!online) {

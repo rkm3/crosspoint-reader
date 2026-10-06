@@ -537,23 +537,28 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     return drop;
   };
 
+  // A queued delete stays in the file until the server accepts it. The list
+  // reads location indexes, so leaving it out of those drops the row now.
+  auto queuedDelete = [&](const Document& doc) {
+    return journal_.findLatest(doc.id, OpType::Delete) != nullptr;
+  };
+
   auto emit = [&](const Document& doc, size_t encodedLen) {
     offsets.push_back(cursor);
     cursor += static_cast<uint32_t>(encodedLen);
-    IndexEntry entry{};
-    entry.recordIndex = written;
-    entry.location = doc.location;
-    copyBounded(entry.lastMovedAt, TIMESTAMP_CAP, doc.lastMovedAt, strlen(doc.lastMovedAt));
-    indexEntries.push_back(entry);
+    if (!queuedDelete(doc)) {
+      IndexEntry entry{};
+      entry.recordIndex = written;
+      entry.location = doc.location;
+      copyBounded(entry.lastMovedAt, TIMESTAMP_CAP, doc.lastMovedAt, strlen(doc.lastMovedAt));
+      indexEntries.push_back(entry);
+    }
     ++written;
   };
 
   for (const StagedRef& ref : staged) {
     if (ref.length == 0) {
       continue;  // tombstone: nothing staged; its work happens in carry-over
-    }
-    if (nonFeedWritten >= documentCap_ && feedWritten >= feedCap_) {
-      break;
     }
     const int read = store_.readRange(sourcePath, ref.offset, recordBuffer_, ref.length);
     if (read != static_cast<int>(ref.length)) {
@@ -570,8 +575,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
     }
     restoreLocalFlags(scratchDoc_);
     const bool isFeed = scratchDoc_.location == Location::Feed;
+    const bool hideQueuedDelete = queuedDelete(scratchDoc_);
     uint16_t& classWritten = isFeed ? feedWritten : nonFeedWritten;
-    if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
+    if (!hideQueuedDelete && classWritten >= (isFeed ? feedCap_ : documentCap_)) {
       if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
         // A feed item displaced by the cap is gone for good; reclaim its body.
         store_.removeTree(articleDir(scratchDoc_.id));
@@ -590,7 +596,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       return false;
     }
     emit(scratchDoc_, len);
-    ++classWritten;
+    if (!hideQueuedDelete) {
+      ++classWritten;
+    }
   }
 
   // Carry over previously cached documents the pull did not supersede.
@@ -600,7 +608,10 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       store_.readRange(docsPath(), 0, existingHeader, DOCS_HEADER_SIZE) == static_cast<int>(DOCS_HEADER_SIZE) &&
       decodeDocsHeader(existingHeader, DOCS_HEADER_SIZE, existing)) {
     uint32_t readOffset = DOCS_HEADER_SIZE;
-    for (uint16_t i = 0; i < existing.recordCount && (nonFeedWritten < documentCap_ || feedWritten < feedCap_); ++i) {
+    // Scan the whole file. The cap check below skips ordinary documents once
+    // a shelf is full, but a queued delete past that point still has to be
+    // copied or the local retry copy disappears before the server accepts it.
+    for (uint16_t i = 0; i < existing.recordCount; ++i) {
       const int read = store_.readRange(docsPath(), readOffset, recordBuffer_, MAX_ENCODED_RECORD);
       if (read <= 0) {
         break;
@@ -634,8 +645,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
       }
       applyQueuedOverrides(scratchDoc_);
       const bool isFeed = scratchDoc_.location == Location::Feed;
+      const bool hideQueuedDelete = queuedDelete(scratchDoc_);
       uint16_t& classWritten = isFeed ? feedWritten : nonFeedWritten;
-      if (classWritten >= (isFeed ? feedCap_ : documentCap_)) {
+      if (!hideQueuedDelete && classWritten >= (isFeed ? feedCap_ : documentCap_)) {
         if (isFeed && (scratchDoc_.flags & FLAG_HAS_BODY) != 0) {
           // Displaced by newer staged feed items; reclaim the body.
           store_.removeTree(articleDir(scratchDoc_.id));
@@ -652,7 +664,9 @@ bool ReadwiseSyncEngine::mergeIntoDocs(const std::string& sourcePath, const std:
         return false;
       }
       emit(scratchDoc_, len);
-      ++classWritten;
+      if (!hideQueuedDelete) {
+        ++classWritten;
+      }
     }
   }
 
