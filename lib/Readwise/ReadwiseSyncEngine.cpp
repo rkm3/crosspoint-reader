@@ -176,9 +176,8 @@ SyncOutcome ReadwiseSyncEngine::sync() {
       }
     }
     if (status != ApiStatus::Ok) {
-      // Persist what was acknowledged before giving up, so the work already
-      // accepted by the server is not repeated on the next pass.
-      journal_.removeAcknowledged(acknowledged);
+      // Name the op before removeAcknowledged, which rewrites the vector this
+      // reference points into.
       const char* verb = "update";
       const char* where = nullptr;
       switch (op.op) {
@@ -198,6 +197,9 @@ SyncOutcome ReadwiseSyncEngine::sync() {
       } else {
         snprintf(step, sizeof(step), "%s %s", verb, op.id);
       }
+      // Persist what was acknowledged before giving up, so the work already
+      // accepted by the server is not repeated on the next pass.
+      journal_.removeAcknowledged(acknowledged);
       noteFailure(outcome, status, step);
       return outcome;
     }

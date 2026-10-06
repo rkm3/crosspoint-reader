@@ -105,7 +105,7 @@ TEST(ReadwiseClientCore, StatusMapping) {
 
 TEST(ReadwiseClientCore, HttpDetailKeepsAShortServerTrace) {
   char out[80];
-  const char* body = "{\"detail\":\"bad\\nid\"}\n";
+  const char* body = "{\"detail\":\"bad\nid\"}\n";
   formatHttpDetail(400, body, strlen(body), out, sizeof(out));
   EXPECT_STREQ(out, "HTTP 400 {\"detail\":\"bad id\"}");
 

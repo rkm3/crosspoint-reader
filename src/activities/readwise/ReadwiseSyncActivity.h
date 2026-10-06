@@ -51,7 +51,9 @@ class ReadwiseSyncActivity final : public Activity {
   State state = State::CONNECTING;
   std::string statusMessage;
   // Step and server snippet when sync fails. Diagnostic text, not a translation.
-  char failureDetail[readwise::SyncOutcome::DETAIL_CAP] = {};
+  // Same width as SyncOutcome::detail; the cpp static_asserts that.
+  static constexpr size_t FAILURE_DETAIL_CAP = 160;
+  char failureDetail[FAILURE_DETAIL_CAP] = {};
   uint16_t pushed = 0;
   uint16_t pulled = 0;
   uint16_t bodiesDone = 0;

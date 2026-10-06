@@ -389,6 +389,8 @@ void ReadwiseSyncActivity::renderDownloading() const {
 // (highlight, delete, move, pull) and, when the server sent one, the HTTP
 // status and a short response snippet. drawPopup is one line and does not wrap.
 void ReadwiseSyncActivity::renderFailed() const {
+  static_assert(FAILURE_DETAIL_CAP == sizeof(readwise::SyncOutcome::detail),
+                "failure trace must fit the engine's detail");
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();

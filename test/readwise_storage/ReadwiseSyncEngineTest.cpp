@@ -237,7 +237,7 @@ TEST(ReadwiseSync, FailedPushPreservesUnacknowledgedOps) {
   EXPECT_EQ(outcome.failedStage, SyncStage::Pushing);
   EXPECT_EQ(outcome.status, ApiStatus::ServerError);
   EXPECT_EQ(outcome.pushed, 1);
-  EXPECT_NE(std::string(outcome.detail).find("move archive doc2"), std::string::npos);
+  EXPECT_NE(std::string(outcome.detail).find("move archive doc2"), std::string::npos) << outcome.detail;
   EXPECT_NE(std::string(outcome.detail).find("HTTP 400"), std::string::npos);
 
   ReadwiseJournal reloaded(f.store, f.engine.journalPath());

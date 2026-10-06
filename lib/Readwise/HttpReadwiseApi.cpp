@@ -230,8 +230,9 @@ ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, co
   configureClient(http, token);
   http.addHeader("Content-Type", "application/json");
   const int status = http.sendRequest("POST", body.get());
-  const std::string& response = http.getString();
-  noteHttpResult(status, response.c_str(), response.size());
+  // getString() is std::string on device and Arduino String in the simulator.
+  // Both expose c_str() and length(). The temporary lives for this call.
+  noteHttpResult(status, http.getString().c_str(), http.getString().length());
   http.end();
   LOG_DBG("RWAPI", "POST highlight -> %d", status);
   return statusFromHttp(status);
@@ -258,8 +259,7 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
     configureClient(http, token);
     const int status = http.sendRequest("DELETE", "");
     if (status != 404) {
-      const std::string& response = http.getString();
-      noteHttpResult(status, response.c_str(), response.size());
+      noteHttpResult(status, http.getString().c_str(), http.getString().length());
     }
     http.end();
     LOG_DBG("RWAPI", "DELETE %s -> %d", url, status);
@@ -287,8 +287,7 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
   configureClient(http, token);
   http.addHeader("Content-Type", "application/json");
   const int status = http.sendRequest("PATCH", body);
-  const std::string& response = http.getString();
-  noteHttpResult(status, response.c_str(), response.size());
+  noteHttpResult(status, http.getString().c_str(), http.getString().length());
   http.end();
 
   LOG_DBG("RWAPI", "PATCH %s -> %d", url, status);
