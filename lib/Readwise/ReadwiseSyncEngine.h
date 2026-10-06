@@ -7,6 +7,7 @@
 #include "ReadwiseApi.h"
 #include "ReadwiseCodec.h"
 #include "ReadwiseFileStore.h"
+#include "ReadwiseHighlight.h"
 #include "ReadwiseJournal.h"
 
 // The recoverable sync pipeline.
@@ -132,6 +133,11 @@ class ReadwiseSyncEngine {
   static constexpr size_t NOTE_CAP = 241;
   bool readNote(const char* id, char* out, size_t outCap);
   bool writeNote(const char* id, const char* text);
+
+  // Queues a quote for the next sync. The text is cut to HIGHLIGHT_TEXT_MAX on
+  // a word boundary. Title, author, and source URL are copied from docs.bin
+  // when the document is still there. Empty text is refused.
+  bool appendHighlight(const char* id, const char* text);
 
   // Location-index offsets whose author matches, in shelf order. One document
   // is decoded at a time. `author` is the stored AUTHOR_CAP string.
@@ -293,6 +299,14 @@ class ReadwiseSyncEngine {
   bool loadIndexedDocument(Location location, uint16_t slot, const DocsHeader& header, uint16_t* recordIndex = nullptr);
   bool loadRecord(uint16_t recordIndex, const DocsHeader& header);
   std::string notePath(const char* id) const;
+  std::string highlightPath(const char* id) const;
+  std::string highlightIndexPath() const;
+  bool indexHighlight(const char* id);
+  bool unindexHighlight(const char* id);
+  // Posts unposted clips. A transport failure leaves the rest queued.
+  ApiStatus pushPendingHighlights();
+  // One document. `stillPending` is true when a clip remains unposted.
+  ApiStatus pushHighlightFile(const char* id, bool& stillPending);
 
   std::string stagingPath() const { return baseDir_ + "/incoming.bin"; }
 
@@ -307,6 +321,9 @@ class ReadwiseSyncEngine {
   // Document is ~800 bytes, well over the project's 256-byte stack guidance.
   Document scratchDoc_;
   uint8_t recordBuffer_[MAX_ENCODED_RECORD];
+  // One quote while a highlights.bin record is read. The engine is heap-allocated;
+  // 281 bytes does not belong on the stack.
+  char highlightText_[HIGHLIGHT_TEXT_MAX + 1] = {};
   // Set for the duration of forgetDocument's rewrite. mergeIntoDocs skips it
   // and drops its body instead of carrying it forward.
   char droppingId_[ID_CAP] = {};

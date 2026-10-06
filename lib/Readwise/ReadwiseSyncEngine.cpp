@@ -130,7 +130,14 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   journal_.coalesce();
 
   // --- 2. Push, oldest-first ---------------------------------------------
+  // Clips go first. A queued delete removes the article directory, and the
+  // quote file lives in it.
   outcome.failedStage = SyncStage::Pushing;
+  const ApiStatus highlightStatus = pushPendingHighlights();
+  if (highlightStatus != ApiStatus::Ok) {
+    outcome.status = highlightStatus;
+    return outcome;
+  }
   std::vector<uint32_t> acknowledged;
   acknowledged.reserve(journal_.entries().size());
   for (const PendingOp& op : journal_.entries()) {
@@ -866,6 +873,334 @@ bool ReadwiseSyncEngine::writeNote(const char* id, const char* text) {
   return store_.writeAll(path, reinterpret_cast<const uint8_t*>(bounded), strlen(bounded));
 }
 
+std::string ReadwiseSyncEngine::highlightPath(const char* id) const { return articleDir(id) + "/highlights.bin"; }
+
+std::string ReadwiseSyncEngine::highlightIndexPath() const { return baseDir_ + "/highlights.idx"; }
+
+bool ReadwiseSyncEngine::indexHighlight(const char* id) {
+  const std::string path = highlightIndexPath();
+  uint8_t header[3] = {};
+  const int headerRead = store_.readRange(path, 0, header, sizeof(header));
+  uint16_t count = 0;
+  bool readable = headerRead == static_cast<int>(sizeof(header)) && header[0] == HIGHLIGHT_INDEX_VERSION;
+  if (readable) {
+    count = static_cast<uint16_t>(header[1] | (header[2] << 8));
+    if (count > HIGHLIGHT_INDEX_MAX) {
+      readable = false;
+      count = 0;
+    }
+  }
+  for (uint16_t i = 0; readable && i < count; ++i) {
+    char existing[ID_CAP] = {};
+    const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
+    if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(existing), ID_CAP) != ID_CAP) {
+      readable = false;
+      count = 0;
+      break;
+    }
+    existing[ID_CAP - 1] = '\0';
+    if (sameId(existing, id)) {
+      return true;
+    }
+  }
+  if (count >= HIGHLIGHT_INDEX_MAX) {
+    return false;
+  }
+  if (!store_.beginWrite(path)) {
+    return false;
+  }
+  const uint16_t next = static_cast<uint16_t>(count + 1);
+  uint8_t nextHeader[3] = {HIGHLIGHT_INDEX_VERSION, static_cast<uint8_t>(next & 0xFF), static_cast<uint8_t>(next >> 8)};
+  if (!store_.writeChunk(nextHeader, sizeof(nextHeader))) {
+    store_.abortWrite();
+    return false;
+  }
+  for (uint16_t i = 0; readable && i < count; ++i) {
+    char existing[ID_CAP] = {};
+    const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
+    if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(existing), ID_CAP) != ID_CAP ||
+        !store_.writeChunk(reinterpret_cast<const uint8_t*>(existing), ID_CAP)) {
+      store_.abortWrite();
+      return false;
+    }
+  }
+  char stored[ID_CAP] = {};
+  copyBounded(stored, ID_CAP, id, strlen(id));
+  if (!store_.writeChunk(reinterpret_cast<const uint8_t*>(stored), ID_CAP)) {
+    store_.abortWrite();
+    return false;
+  }
+  if (!store_.commitWrite()) {
+    store_.abortWrite();
+    return false;
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::unindexHighlight(const char* id) {
+  const std::string path = highlightIndexPath();
+  uint8_t header[3] = {};
+  if (store_.readRange(path, 0, header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
+      header[0] != HIGHLIGHT_INDEX_VERSION) {
+    return true;
+  }
+  const uint16_t count = static_cast<uint16_t>(header[1] | (header[2] << 8));
+  if (count > HIGHLIGHT_INDEX_MAX) {
+    return store_.remove(path);
+  }
+  if (!store_.beginWrite(path)) {
+    return false;
+  }
+  uint8_t placeholder[3] = {HIGHLIGHT_INDEX_VERSION, 0, 0};
+  if (!store_.writeChunk(placeholder, sizeof(placeholder))) {
+    store_.abortWrite();
+    return false;
+  }
+  uint16_t kept = 0;
+  for (uint16_t i = 0; i < count; ++i) {
+    char existing[ID_CAP] = {};
+    const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
+    if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(existing), ID_CAP) != ID_CAP) {
+      store_.abortWrite();
+      return false;
+    }
+    existing[ID_CAP - 1] = '\0';
+    if (sameId(existing, id)) {
+      continue;
+    }
+    if (!store_.writeChunk(reinterpret_cast<const uint8_t*>(existing), ID_CAP)) {
+      store_.abortWrite();
+      return false;
+    }
+    ++kept;
+  }
+  uint8_t nextHeader[3] = {HIGHLIGHT_INDEX_VERSION, static_cast<uint8_t>(kept & 0xFF), static_cast<uint8_t>(kept >> 8)};
+  if (!store_.patchWrite(0, nextHeader, sizeof(nextHeader)) || !store_.commitWrite()) {
+    store_.abortWrite();
+    return false;
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
+  if (!isValidDocumentId(id) || text == nullptr) {
+    return false;
+  }
+  copyBounded(highlightText_, sizeof(highlightText_), text, strlen(text));
+  if (!fitHighlightText(highlightText_, sizeof(highlightText_))) {
+    return false;
+  }
+  if (!store_.ensureDir(articleDir(id))) {
+    return false;
+  }
+  const std::string path = highlightPath(id);
+  const long fileSize = store_.size(path);
+  const size_t textLen = strlen(highlightText_);
+  if (fileSize < 0) {
+    auto created = makeUniqueNoThrow<uint8_t[]>(HIGHLIGHT_HEADER_BYTES + 3 + textLen);
+    if (!created) {
+      return false;
+    }
+    memset(created.get(), 0, HIGHLIGHT_HEADER_BYTES);
+    created[0] = HIGHLIGHT_FILE_VERSION;
+    if (findDocument(id, scratchDoc_)) {
+      memcpy(created.get() + 1, scratchDoc_.title, TITLE_CAP);
+      memcpy(created.get() + 1 + TITLE_CAP, scratchDoc_.author, AUTHOR_CAP);
+      memcpy(created.get() + 1 + TITLE_CAP + AUTHOR_CAP, scratchDoc_.sourceUrl, SOURCE_URL_CAP);
+    }
+    created[HIGHLIGHT_HEADER_BYTES] = static_cast<uint8_t>(textLen & 0xFF);
+    created[HIGHLIGHT_HEADER_BYTES + 1] = static_cast<uint8_t>(textLen >> 8);
+    created[HIGHLIGHT_HEADER_BYTES + 2] = 0;
+    memcpy(created.get() + HIGHLIGHT_HEADER_BYTES + 3, highlightText_, textLen);
+    if (!store_.writeAll(path, created.get(), HIGHLIGHT_HEADER_BYTES + 3 + textLen)) {
+      return false;
+    }
+    return indexHighlight(id);
+  }
+  if (static_cast<size_t>(fileSize) < HIGHLIGHT_HEADER_BYTES) {
+    return false;
+  }
+  uint8_t version = 0;
+  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+    return false;
+  }
+  // The scan reads each stored quote into highlightText_, so the fitted text
+  // has to live somewhere else. 281 bytes is over the stack budget.
+  auto fitted = makeUniqueNoThrow<char[]>(textLen + 1);
+  if (!fitted) {
+    return false;
+  }
+  memcpy(fitted.get(), highlightText_, textLen + 1);
+
+  size_t offset = HIGHLIGHT_HEADER_BYTES;
+  int records = 0;
+  while (offset + 3 <= static_cast<size_t>(fileSize)) {
+    uint8_t prefix[3] = {};
+    if (store_.readRange(path, offset, prefix, sizeof(prefix)) != static_cast<int>(sizeof(prefix))) {
+      return false;
+    }
+    const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
+    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+      return false;
+    }
+    if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(highlightText_), len) != static_cast<int>(len)) {
+      return false;
+    }
+    highlightText_[len] = '\0';
+    if (strcmp(highlightText_, fitted.get()) == 0) {
+      return indexHighlight(id);
+    }
+    offset += 3 + len;
+    ++records;
+  }
+  if (records >= HIGHLIGHT_MAX_PER_DOC) {
+    return false;
+  }
+  if (!store_.beginWrite(path)) {
+    return false;
+  }
+  size_t copied = 0;
+  uint8_t chunk[128];
+  while (copied < static_cast<size_t>(fileSize)) {
+    const size_t want = static_cast<size_t>(fileSize) - copied < sizeof(chunk) ? static_cast<size_t>(fileSize) - copied
+                                                                               : sizeof(chunk);
+    const int got = store_.readRange(path, copied, chunk, want);
+    if (got <= 0 || !store_.writeChunk(chunk, static_cast<size_t>(got))) {
+      store_.abortWrite();
+      return false;
+    }
+    copied += static_cast<size_t>(got);
+  }
+  uint8_t recordHead[3] = {static_cast<uint8_t>(textLen & 0xFF), static_cast<uint8_t>(textLen >> 8), 0};
+  if (!store_.writeChunk(recordHead, sizeof(recordHead)) ||
+      !store_.writeChunk(reinterpret_cast<const uint8_t*>(fitted.get()), textLen) || !store_.commitWrite()) {
+    store_.abortWrite();
+    return false;
+  }
+  return indexHighlight(id);
+}
+
+ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending) {
+  stillPending = false;
+  const std::string path = highlightPath(id);
+  const long fileSize = store_.size(path);
+  if (fileSize < 0) {
+    return ApiStatus::Ok;
+  }
+  if (static_cast<size_t>(fileSize) < HIGHLIGHT_HEADER_BYTES) {
+    stillPending = true;
+    return ApiStatus::Ok;
+  }
+  uint8_t version = 0;
+  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+    stillPending = true;
+    return ApiStatus::Ok;
+  }
+  if (store_.readRange(path, 1, reinterpret_cast<uint8_t*>(scratchDoc_.title), TITLE_CAP) != TITLE_CAP ||
+      store_.readRange(path, 1 + TITLE_CAP, reinterpret_cast<uint8_t*>(scratchDoc_.author), AUTHOR_CAP) != AUTHOR_CAP ||
+      store_.readRange(path, 1 + TITLE_CAP + AUTHOR_CAP, reinterpret_cast<uint8_t*>(scratchDoc_.sourceUrl),
+                       SOURCE_URL_CAP) != SOURCE_URL_CAP) {
+    stillPending = true;
+    return ApiStatus::Ok;
+  }
+  scratchDoc_.title[TITLE_CAP - 1] = '\0';
+  scratchDoc_.author[AUTHOR_CAP - 1] = '\0';
+  scratchDoc_.sourceUrl[SOURCE_URL_CAP - 1] = '\0';
+
+  size_t offset = HIGHLIGHT_HEADER_BYTES;
+  while (offset + 3 <= static_cast<size_t>(fileSize)) {
+    uint8_t prefix[3] = {};
+    if (store_.readRange(path, offset, prefix, sizeof(prefix)) != static_cast<int>(sizeof(prefix))) {
+      stillPending = true;
+      return ApiStatus::Ok;
+    }
+    const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
+    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+      stillPending = true;
+      return ApiStatus::Ok;
+    }
+    const uint8_t flags = prefix[2];
+    if ((flags & HIGHLIGHT_FLAG_POSTED) == 0) {
+      if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(highlightText_), len) !=
+          static_cast<int>(len)) {
+        stillPending = true;
+        return ApiStatus::Ok;
+      }
+      highlightText_[len] = '\0';
+      ApiStatus status =
+          api_.pushHighlight(highlightText_, scratchDoc_.title, scratchDoc_.author, scratchDoc_.sourceUrl);
+      if (status == ApiStatus::RateLimited) {
+        for (int retry = 0; retry < MAX_RATE_LIMIT_RETRIES && status == ApiStatus::RateLimited; ++retry) {
+          status =
+              api_.pushHighlight(highlightText_, scratchDoc_.title, scratchDoc_.author, scratchDoc_.sourceUrl);
+        }
+      }
+      if (status != ApiStatus::Ok) {
+        stillPending = true;
+        return status;
+      }
+      const uint8_t posted = static_cast<uint8_t>(flags | HIGHLIGHT_FLAG_POSTED);
+      if (!store_.writeRange(path, offset + 2, &posted, 1)) {
+        stillPending = true;
+        return ApiStatus::Ok;
+      }
+    }
+    offset += 3 + len;
+  }
+  return ApiStatus::Ok;
+}
+
+ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
+  const std::string path = highlightIndexPath();
+  uint8_t header[3] = {};
+  if (store_.readRange(path, 0, header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
+      header[0] != HIGHLIGHT_INDEX_VERSION) {
+    return ApiStatus::Ok;
+  }
+  const uint16_t count = static_cast<uint16_t>(header[1] | (header[2] << 8));
+  if (count == 0 || count > HIGHLIGHT_INDEX_MAX) {
+    return ApiStatus::Ok;
+  }
+  if (!store_.beginWrite(path)) {
+    return ApiStatus::ServerError;
+  }
+  uint8_t placeholder[3] = {HIGHLIGHT_INDEX_VERSION, 0, 0};
+  if (!store_.writeChunk(placeholder, sizeof(placeholder))) {
+    store_.abortWrite();
+    return ApiStatus::ServerError;
+  }
+  uint16_t kept = 0;
+  for (uint16_t i = 0; i < count; ++i) {
+    char id[ID_CAP] = {};
+    const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
+    if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(id), ID_CAP) != ID_CAP) {
+      store_.abortWrite();
+      return ApiStatus::ServerError;
+    }
+    id[ID_CAP - 1] = '\0';
+    bool stillPending = false;
+    const ApiStatus status = pushHighlightFile(id, stillPending);
+    if (status != ApiStatus::Ok) {
+      store_.abortWrite();
+      return status;
+    }
+    if (!stillPending) {
+      continue;
+    }
+    if (!store_.writeChunk(reinterpret_cast<const uint8_t*>(id), ID_CAP)) {
+      store_.abortWrite();
+      return ApiStatus::ServerError;
+    }
+    ++kept;
+  }
+  uint8_t nextHeader[3] = {HIGHLIGHT_INDEX_VERSION, static_cast<uint8_t>(kept & 0xFF), static_cast<uint8_t>(kept >> 8)};
+  if (!store_.patchWrite(0, nextHeader, sizeof(nextHeader)) || !store_.commitWrite()) {
+    store_.abortWrite();
+    return ApiStatus::ServerError;
+  }
+  return ApiStatus::Ok;
+}
+
 bool ReadwiseSyncEngine::forgetDocument(const char* id) {
   if (!isValidDocumentId(id)) {
     return false;
@@ -873,6 +1208,7 @@ bool ReadwiseSyncEngine::forgetDocument(const char* id) {
   copyBounded(droppingId_, ID_CAP, id, strlen(id));
   store_.removeTree(articleDir(id));
   writeNote(id, "");
+  unindexHighlight(id);
   std::vector<IndexEntry> indexEntries;
   indexEntries.reserve(static_cast<size_t>(documentCap_) + feedCap_);
   uint16_t retained = 0;

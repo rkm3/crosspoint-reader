@@ -26,6 +26,7 @@ class HttpReadwiseApi : public ReadwiseApi {
   ApiStatus checkAuth();
 
   ListResponse fetchPage(const ListQuery& query, DocumentSink& sink) override;
+  ApiStatus pushHighlight(const char* text, const char* title, const char* author, const char* sourceUrl) override;
   ApiStatus pushOp(const PendingOp& op) override;
   ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) override;
 

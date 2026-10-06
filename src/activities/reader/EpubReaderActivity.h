@@ -16,6 +16,7 @@
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
 #include "ReaderToolbarUi.h"
+#include "activities/readwise/ReadwiseSupport.h"
 #include "components/OptionPopup.h"
 
 class EpubReaderActivity final : public ReaderActivity {
@@ -54,6 +55,23 @@ class EpubReaderActivity final : public ReaderActivity {
   bool recentsEntryRemoved = false;
   unsigned long bookmarkMessageTime = 0UL;
   bool pendingReadFolderMove = false;
+
+  // End of a managed article. The list's entry menu is offered once per visit
+  // to that page. Archive, delete, and the author filter hand back to the library.
+  bool readwiseArticle = false;
+  bool readwiseEndMenuOffered = false;
+  OptionPopup readwiseEndPopup;
+  char readwiseEndId[readwise::ID_CAP] = {};
+  char readwiseEndTitle[readwise::TITLE_CAP] = {};
+  char readwiseEndAuthor[readwise::AUTHOR_CAP] = {};
+  ReadwiseUi::ReadwiseEntryAction readwiseEndActions[4] = {};
+  uint8_t readwiseEndActionCount = 0;
+  void offerReadwiseEndMenu();
+  void showReadwiseEndMenu();
+  void onReadwiseEndMenu(int selected);
+  void startReadwiseEndComment();
+  void returnToReadwiseShelf(ReadwiseUi::ShelfReturn::Action action);
+  bool presentEndOfBookOverlay() override;
 
   // Toolbar reader menu (SETTINGS.readerMenuStyle == READER_MENU_TOOLBAR): drawn
   // over the page instead of pushing the full-screen list menu. Select opens the
@@ -173,6 +191,7 @@ class EpubReaderActivity final : public ReaderActivity {
   void activateMoreRow(int row);
   void openFootnoteSelect(bool reopenMenuOnCancel);
   void openDictionaryWordSelect();
+  void openHighlightSelect();
   bool launchKOReaderSync();
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
@@ -222,6 +241,7 @@ class EpubReaderActivity final : public ReaderActivity {
 
   void loop() override;
   void render(RenderLock&& lock) override;
+  bool handleHomeGesture() override;
 
   bool pageTurn(bool isForward) override;
   bool skipPages(int amount) override;

@@ -27,6 +27,7 @@ add_executable(ReadwiseClientTest
   ${REPO_ROOT}/lib/Readwise/ReadwiseCodec.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseListParser.cpp
   ${REPO_ROOT}/lib/Readwise/ReadwiseClientCore.cpp
+  ${REPO_ROOT}/lib/Readwise/ReadwiseHighlight.cpp
   ${REPO_ROOT}/lib/Readwise/HtmlTokenizer.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleImageUrl.cpp
   ${REPO_ROOT}/lib/Readwise/ArticleXhtmlWriter.cpp

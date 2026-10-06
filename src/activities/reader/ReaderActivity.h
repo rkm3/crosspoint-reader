@@ -54,6 +54,9 @@ class ReaderActivity : public Activity {
   virtual void renderBook() = 0;
   virtual void applyInitialOrientation();
   virtual void onEndOfBookRendered() {}
+  // Drawn after the end page, before the buffer is presented. Return true when
+  // the overlay presented the frame itself.
+  virtual bool presentEndOfBookOverlay() { return false; }
 
   bool handleBackNavigation();
   /** True while the end-of-book suggestion menu is on screen and owning input. */

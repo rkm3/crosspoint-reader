@@ -122,6 +122,7 @@ void ReadwiseLibraryActivity::onEnter() {
   // Entered by a Back press that is very likely still held; see the member.
   ignoreBackUntilReleased = mappedInput.isPressed(MappedInputManager::Button::Back);
   reloadCounts();
+  applyShelfReturn();
   requestUpdate();
 }
 
@@ -607,6 +608,32 @@ bool ReadwiseLibraryActivity::handleLocationHold(const MappedInputManager::Butto
     }
   }
   return true;  // held: swallow the frame either way
+}
+
+void ReadwiseLibraryActivity::applyShelfReturn() {
+  const ReadwiseUi::ShelfReturn request = ReadwiseUi::takeShelfReturn();
+  if (request.action == ReadwiseUi::ShelfReturn::Action::None || engine == nullptr) {
+    return;
+  }
+  if (request.action == ReadwiseUi::ShelfReturn::Action::FilterAuthor) {
+    applyAuthorFilter(request.author);
+    return;
+  }
+  auto doc = makeUniqueNoThrow<readwise::Document>();
+  if (!doc || !engine->findDocument(request.id, *doc)) {
+    LOG_ERR("RWLIB", "End-of-article action lost its document");
+    return;
+  }
+  readwise::copyBounded(menuId, sizeof(menuId), doc->id, strlen(doc->id));
+  readwise::copyBounded(menuTitle, sizeof(menuTitle), doc->title, strlen(doc->title));
+  readwise::copyBounded(menuRev, sizeof(menuRev), doc->updatedAt, strlen(doc->updatedAt));
+  if (request.action == ReadwiseUi::ShelfReturn::Action::Archive) {
+    queueMove(*doc, readwise::Location::Archive);
+    return;
+  }
+  if (request.action == ReadwiseUi::ShelfReturn::Action::Delete) {
+    pushDelete();
+  }
 }
 
 void ReadwiseLibraryActivity::queueMove(const readwise::Document& doc, const readwise::Location target) {

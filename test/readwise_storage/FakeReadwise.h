@@ -198,6 +198,25 @@ class FakeApi : public readwise::ReadwiseApi {
     return response;
   }
 
+  struct PostedHighlight {
+    std::string text;
+    std::string title;
+    std::string author;
+    std::string sourceUrl;
+  };
+  std::vector<PostedHighlight> highlights;
+  bool failHighlights = false;
+
+  readwise::ApiStatus pushHighlight(const char* text, const char* title, const char* author,
+                                    const char* sourceUrl) override {
+    if (failHighlights) {
+      return readwise::ApiStatus::NetworkError;
+    }
+    highlights.push_back({text != nullptr ? text : "", title != nullptr ? title : "", author != nullptr ? author : "",
+                          sourceUrl != nullptr ? sourceUrl : ""});
+    return readwise::ApiStatus::Ok;
+  }
+
   readwise::ApiStatus pushOp(const readwise::PendingOp& op) override {
     ++pushAttempts;
     if (failPushAt > 0 && pushAttempts == failPushAt) {

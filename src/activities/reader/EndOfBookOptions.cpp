@@ -11,6 +11,7 @@
 // std::unique_ptr<Activity> members. Destroying that unique_ptr needs the complete type, so the
 // definition must be visible here.
 #include "activities/Activity.h"
+#include "activities/readwise/ReadwiseSupport.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ButtonNavigator.h"
@@ -32,6 +33,12 @@ EndOfBookOptions::EndOfBookOptions(GfxRenderer& renderer) : UiAppHost(renderer),
 
 void EndOfBookOptions::loadOnce(const std::string& currentBookPath) {
   if (isLoaded.load(std::memory_order_acquire)) {
+    return;
+  }
+  // The article directory holds one epub and its cache, not a shelf of books.
+  // The end page stays the plain title; the Readwise menu is drawn over it.
+  if (ReadwiseUi::isBodyPath(currentBookPath)) {
+    isLoaded.store(true, std::memory_order_release);
     return;
   }
   folder = FsHelpers::extractFolderPath(currentBookPath);

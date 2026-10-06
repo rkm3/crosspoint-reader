@@ -76,6 +76,8 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void migrateLegacyTextBodies();
   static void sImageProgress(void* ctx, size_t done, size_t total);
   void queueMove(const readwise::Document& doc, readwise::Location target);
+  // Applies a shelf action queued by the reader at the end of an article.
+  void applyShelfReturn();
   void showEntryMenu(int index);
   void confirmDelete();
   void pushDelete();

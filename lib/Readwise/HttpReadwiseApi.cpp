@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "ReadwiseClientCore.h"
+#include "ReadwiseHighlight.h"
 #include "ReadwiseListParser.h"
 
 namespace readwise {
@@ -161,6 +162,41 @@ ApiStatus HttpReadwiseApi::fetchBody(const char* id, BodySink& sink, uint16_t* r
     bool onDocument(const Document&) override { return true; }
   } discard;
   return runListRequest(url, discard, &sink, nullptr, retryAfterSeconds);
+}
+
+ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, const char* author,
+                                        const char* sourceUrl) {
+  if (token.empty()) {
+    return ApiStatus::NoCredentials;
+  }
+  if (text == nullptr || text[0] == '\0') {
+    return ApiStatus::ServerError;
+  }
+  // Escaping can double the quote, title, author, and URL. 2 KB covers that
+  // plus the JSON keys; the quote itself is capped at 280 bytes.
+  constexpr size_t kBodyCap = 2048;
+  auto body = makeUniqueNoThrow<char[]>(kBodyCap);
+  if (!body) {
+    LOG_ERR("RWAPI", "OOM: highlight body");
+    return ApiStatus::LowMemory;
+  }
+  if (!buildHighlightBody(text, title, author, sourceUrl, body.get(), kBodyCap)) {
+    LOG_ERR("RWAPI", "Highlight body did not fit");
+    return ApiStatus::ServerError;
+  }
+  if (insufficientHeap()) {
+    return ApiStatus::LowMemory;
+  }
+  freeink::SecureHttpClient http;
+  if (!http.begin(HIGHLIGHTS_URL)) {
+    return ApiStatus::NetworkError;
+  }
+  configureClient(http, token);
+  http.addHeader("Content-Type", "application/json");
+  const int status = http.sendRequest("POST", body.get());
+  http.end();
+  LOG_DBG("RWAPI", "POST highlight -> %d", status);
+  return statusFromHttp(status);
 }
 
 ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {

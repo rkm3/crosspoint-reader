@@ -85,6 +85,11 @@ class ReadwiseApi {
   // Fetches one page and streams its documents to `sink`.
   virtual ListResponse fetchPage(const ListQuery& query, DocumentSink& sink) = 0;
 
+  // Posts one quote to the Readwise highlight library (POST /api/v2/highlights/),
+  // using the same token as the Reader calls. A repeat of the same text, title,
+  // author, and source URL is a no-op on the server.
+  virtual ApiStatus pushHighlight(const char* text, const char* title, const char* author, const char* sourceUrl) = 0;
+
   // Applies one pending operation. SetLocation and SetSeen are PATCH /update/.
   // Delete is DELETE /delete/. PATCH answers 200 for reading_progress and
   // silently discards it, so progress is never pushed.

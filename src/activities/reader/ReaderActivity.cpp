@@ -223,7 +223,13 @@ bool ReaderActivity::handleEndOfBookPageTurn(const bool prevTriggered, const boo
     return true;
   }
   if (nextTriggered) {
-    onGoHome();
+    // A finished article belongs back on its shelf. Sibling-book suggestions
+    // are not offered for a managed body, so this is the leave gesture.
+    if (ReadwiseUi::isBodyPath(bookPath)) {
+      activityManager.goToReadwiseLibrary();
+    } else {
+      onGoHome();
+    }
   } else if (prevTriggered) {
     onReturnFromEndOfBook();
     requestUpdate();
@@ -270,7 +276,9 @@ void ReaderActivity::render(RenderLock&&) {
       endOfBookOptionsReady.store(true, std::memory_order_release);
       endOfBookOptions->render(renderer, mappedInput);
     }
-    renderer.displayBuffer();
+    if (!presentEndOfBookOverlay()) {
+      renderer.displayBuffer();
+    }
     onEndOfBookRendered();
     markPageRendered();
     readerSession.onRenderComplete(millis(), trustedtime::trustedNow(), getProgressBasisPoints());

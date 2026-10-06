@@ -719,9 +719,18 @@ One directory per article, holding everything the article owns:
 ```text
 bodies/<id>/
     article.epub      store-only (method 0) EPUB, written on device
+    highlights.bin    quotes taken on this device, version 1
     epub_<hash>/      the reader's own cache: book.bin, sections, extracted
                       images, .pxc pixel caches, cover/thumb bitmaps
 ```
+
+`highlights.bin` is the clip queue for one article. The header snapshots the
+title, author, and source URL at the first quote, and each record is a little-
+endian length, a flags byte (`bit 0` set once `POST /api/v2/highlights/` has
+accepted it), and the quote bytes (at most 280). A repeat of the same quote is
+not stored again. `highlights.idx` at the Readwise root lists the document ids
+that still have an unposted quote, because sync cannot list the bodies
+directory. Deleting the article directory deletes the quotes with it.
 
 `article.epub` is built from the API's `html_content` as it streams, and
 contains `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf`,

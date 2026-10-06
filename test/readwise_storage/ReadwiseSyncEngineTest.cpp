@@ -844,3 +844,39 @@ TEST(ReadwiseSync, LengthSlotsSplitLaterAndShortlistByWordCount) {
   EXPECT_TRUE(f.engine.readRecords(nullptr, 0, docs));
   EXPECT_TRUE(docs.empty());
 }
+
+TEST(ReadwiseSync, HighlightIsPostedOnceOnSync) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  f.api.pages.push_back({{makeDoc(id, Location::Later, kT1, kT1)}, "", ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Call me Ishmael"));
+  ASSERT_TRUE(f.engine.appendHighlight(id, "Call me Ishmael"));
+  const SyncOutcome posted = f.engine.sync();
+  ASSERT_TRUE(posted.ok) << "failed at stage " << static_cast<int>(posted.failedStage);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "Call me Ishmael");
+  EXPECT_EQ(f.api.highlights[0].title, "Title");
+
+  f.api.highlights.clear();
+  ASSERT_TRUE(f.engine.sync().ok);
+  EXPECT_TRUE(f.api.highlights.empty());
+}
+
+TEST(ReadwiseSync, HighlightPushFailureStaysQueued) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  ASSERT_TRUE(f.engine.appendHighlight(id, "A quote with \"marks\""));
+  f.api.failHighlights = true;
+  const SyncOutcome failed = f.engine.sync();
+  EXPECT_FALSE(failed.ok);
+  EXPECT_EQ(failed.failedStage, SyncStage::Pushing);
+  EXPECT_TRUE(f.api.highlights.empty());
+
+  f.api.failHighlights = false;
+  ASSERT_TRUE(f.engine.sync().ok);
+  ASSERT_EQ(f.api.highlights.size(), 1u);
+  EXPECT_EQ(f.api.highlights[0].text, "A quote with \"marks\"");
+  EXPECT_TRUE(f.api.highlights[0].title.empty());
+}

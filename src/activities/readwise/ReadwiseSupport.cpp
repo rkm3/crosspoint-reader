@@ -112,4 +112,19 @@ uint8_t fillReadwiseEntryMenu(const char* author, const char** labels, ReadwiseE
   return count;
 }
 
+namespace {
+ShelfReturn& shelfReturnSlot() {
+  static ShelfReturn slot;
+  return slot;
+}
+}  // namespace
+
+void queueShelfReturn(const ShelfReturn& request) { shelfReturnSlot() = request; }
+
+ShelfReturn takeShelfReturn() {
+  ShelfReturn out = shelfReturnSlot();
+  shelfReturnSlot() = {};
+  return out;
+}
+
 }  // namespace ReadwiseUi
