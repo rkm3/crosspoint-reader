@@ -100,6 +100,7 @@ TEST(ReadwiseClientCore, StatusMapping) {
   EXPECT_EQ(statusFromHttp(429), ApiStatus::RateLimited);
   EXPECT_EQ(statusFromHttp(500), ApiStatus::ServerError);
   EXPECT_EQ(statusFromHttp(400), ApiStatus::ServerError);
+  EXPECT_EQ(statusFromHttp(404), ApiStatus::NotFound);
   EXPECT_EQ(statusFromHttp(-1), ApiStatus::NetworkError);
 }
 

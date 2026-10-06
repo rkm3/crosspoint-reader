@@ -29,6 +29,10 @@ enum class ApiStatus : uint8_t {
   LowMemory,
   ParseError,
   ServerError,
+  // A queued update whose document is already gone. Delete treats 404 as
+  // success before this mapping; PATCH surfaces it so the sync can ask
+  // whether to drop that one op.
+  NotFound,
 };
 
 const char* apiStatusName(ApiStatus status);

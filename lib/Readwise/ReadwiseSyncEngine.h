@@ -18,6 +18,8 @@
 //
 // Every failure path leaves the previous checkpoint and the pending queue
 // intact. A sync that gives up is recoverable; one that half-commits is not.
+// A 404 on one queued update is the exception: the caller can drop that op
+// and the sync continues with the rest.
 
 namespace readwise {
 
@@ -109,8 +111,19 @@ class ReadwiseSyncEngine {
   ReadwiseSyncEngine(ReadwiseApi& api, ReadwiseFileStore& store, std::string baseDir);
 
   // Runs the five stages. On any failure the pass is abandoned with the previous
-  // checkpoint and journal preserved.
+  // checkpoint and journal preserved, except ops a NotFound hook chose to drop.
   SyncOutcome sync();
+
+  // A queued PATCH that answers 404. The document is already gone on the
+  // server (often archived or deleted). Return true to drop that op and the
+  // local copy, then keep syncing. Return false to abort and leave the op
+  // queued. A null hook aborts. `title` and `detail` are valid only for the
+  // call; `title` is empty when the document is not cached.
+  struct NotFoundHooks {
+    void* ctx = nullptr;
+    bool (*onNotFound)(void* ctx, const PendingOp& op, const char* title, const char* detail) = nullptr;
+  };
+  void setNotFoundHooks(NotFoundHooks hooks) { notFoundHooks_ = hooks; }
 
   // Enumerates the synced locations and expires local documents absent from the
   // result. Separate from sync() because the API emits no deletion tombstones:
@@ -282,7 +295,10 @@ class ReadwiseSyncEngine {
   };
 
   ApiStatus pullToStaging(const Checkpoint& checkpoint, std::vector<StagedRef>& staged, char* highestUpdatedAt,
-                          char* step, size_t stepCap);
+                          char* step, size_t stepCap, bool refillNonFeed);
+  // True when no Later or Shortlist document remains after queued overrides.
+  // A missing cache counts as empty. Feed does not.
+  bool nonFeedShelfEmpty();
   // Copies `step` into outcome.detail, appending the API's lastDetail when set.
   void noteFailure(SyncOutcome& outcome, ApiStatus status, const char* step);
   // Rewrites docs.bin from `sourcePath`, whose records `refs` locates. When
@@ -322,6 +338,7 @@ class ReadwiseSyncEngine {
   ReadwiseFileStore& store_;
   std::string baseDir_;
   ReadwiseJournal journal_;
+  NotFoundHooks notFoundHooks_;
   uint16_t documentCap_ = DEFAULT_DOCUMENT_CAP;
   uint16_t feedCap_ = DEFAULT_FEED_CAP;
 

@@ -77,7 +77,7 @@ void HttpReadwiseApi::noteHttpResult(int status, const char* body, size_t bodyLe
     return;
   }
   formatHttpDetail(status, body, bodyLen, detail_, sizeof(detail_));
-  if (mapped == ApiStatus::ServerError) {
+  if (mapped == ApiStatus::ServerError || mapped == ApiStatus::NotFound) {
     LOG_ERR("RWAPI", "%s", detail_);
   }
 }

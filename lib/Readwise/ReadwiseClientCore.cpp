@@ -155,6 +155,9 @@ ApiStatus statusFromHttp(int httpStatus) {
   if (httpStatus == 429) {
     return ApiStatus::RateLimited;
   }
+  if (httpStatus == 404) {
+    return ApiStatus::NotFound;
+  }
   return ApiStatus::ServerError;
 }
 

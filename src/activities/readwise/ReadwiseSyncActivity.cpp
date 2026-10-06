@@ -117,6 +117,10 @@ void ReadwiseSyncActivity::performSync() {
     return;
   }
   engine->setDocumentCap(READWISE_STORE.getDocumentCap());
+  readwise::ReadwiseSyncEngine::NotFoundHooks notFound;
+  notFound.ctx = this;
+  notFound.onNotFound = &ReadwiseSyncActivity::onNotFound;
+  engine->setNotFoundHooks(notFound);
 
   const readwise::SyncOutcome outcome = engine->sync();
 
@@ -217,6 +221,62 @@ void ReadwiseSyncActivity::performSync() {
             readwise::apiStatusName(outcome.status), failureDetail);
   }
   requestUpdate();
+}
+
+bool ReadwiseSyncActivity::onNotFound(void* ctx, const readwise::PendingOp& op, const char* title, const char* detail) {
+  return static_cast<ReadwiseSyncActivity*>(ctx)->promptDropMissing(op.id, title, detail);
+}
+
+bool ReadwiseSyncActivity::promptDropMissing(const char* id, const char* title, const char* detail) {
+  const char* name = (title != nullptr && title[0] != '\0') ? title : (id != nullptr ? id : "");
+  const char* why = tr(STR_READWISE_MAY_BE_GONE);
+  if (name[0] != '\0') {
+    snprintf(skipMessage, sizeof(skipMessage), "%s. %s", name, why);
+  } else {
+    snprintf(skipMessage, sizeof(skipMessage), "%s", why);
+  }
+  LOG_INF("RWSYNC", "Not on server: %s (%s)", name, detail != nullptr ? detail : "");
+
+  const char* options[] = {tr(STR_STOP), tr(STR_CONTINUE)};
+  // -1 until a button fires. Back and an outside tap dismiss without choosing,
+  // which keeps the queued op and stops the sync.
+  int choice = -1;
+  // Continue is the default: a missing document should not end the sync, and
+  // Confirm on a button device takes the highlighted option.
+  skipPopup.showMessage(tr(STR_READWISE_NOT_ON_SERVER), skipMessage, options, 2, 1,
+                        [&](int index) { choice = index; });
+
+  {
+    RenderLock lock(*this);
+    state = State::SKIP_PROMPT;
+  }
+  // Drop a press that landed while the request was in flight.
+  mappedInput.update();
+  requestUpdateAndWait();
+
+  while (skipPopup.isActive()) {
+    delay(20);
+    mappedInput.update();
+    skipPopup.handleInput(mappedInput, [this]() {
+      if (!skipPopup.isActive()) {
+        RenderLock lock(*this);
+        state = State::SYNCING;
+      }
+      requestUpdate(true);
+    });
+  }
+  skipPopup.dismiss();
+
+  const bool drop = choice == 1;
+  if (drop) {
+    LOG_INF("RWSYNC", "Removing %s and continuing", name);
+  } else {
+    LOG_INF("RWSYNC", "Stopping sync; keeping %s queued", name);
+    RenderLock lock(*this);
+    state = State::SYNCING;
+  }
+  requestUpdate(true);
+  return drop;
 }
 
 void ReadwiseSyncActivity::loop() {
@@ -430,6 +490,13 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
       break;
     case State::SYNCING:
       GUI.drawPopup(renderer, tr(STR_READWISE_SYNCING));
+      break;
+    case State::SKIP_PROMPT:
+      // The dialog paints itself, including its own button hints, and presents.
+      // X4 Pro is touch, so those hints are blank and the buttons are on screen.
+      if (skipPopup.processRender(renderer, mappedInput)) {
+        return;
+      }
       break;
     case State::DOWNLOADING_BODIES:
       renderDownloading();

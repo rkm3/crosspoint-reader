@@ -27,6 +27,31 @@ constexpr uint32_t RATE_LIMIT_WAIT_CAP_MS = 30000;
 
 bool sameId(const char* a, const char* b) { return strncmp(a, b, ID_CAP) == 0; }
 
+void formatOpStep(char* step, size_t stepCap, const PendingOp& op) {
+  if (step == nullptr || stepCap == 0) {
+    return;
+  }
+  const char* verb = "update";
+  const char* where = nullptr;
+  switch (op.op) {
+    case OpType::Delete:
+      verb = "delete";
+      break;
+    case OpType::SetSeen:
+      verb = "seen";
+      break;
+    case OpType::SetLocation:
+      verb = "move";
+      where = locationName(static_cast<Location>(op.payload));
+      break;
+  }
+  if (where != nullptr && where[0] != '\0') {
+    snprintf(step, stepCap, "%s %s %s", verb, where, op.id);
+  } else {
+    snprintf(step, stepCap, "%s %s", verb, op.id);
+  }
+}
+
 void writeStep(char* step, size_t stepCap, const char* text) {
   if (step == nullptr || stepCap == 0) {
     return;
@@ -54,6 +79,8 @@ const char* apiStatusName(ApiStatus status) {
       return "parse error";
     case ApiStatus::ServerError:
       return "server error";
+    case ApiStatus::NotFound:
+      return "not found";
   }
   return "unknown";
 }
@@ -168,6 +195,17 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   }
   std::vector<uint32_t> acknowledged;
   acknowledged.reserve(journal_.entries().size());
+  // 404s the caller chose to drop. Kept out of `acknowledged` until they are
+  // persisted, so a later failure does not forget a drop the user already made,
+  // and a failed persist is retried on the way out.
+  std::vector<uint32_t> skipped;
+  auto persistResolved = [&]() {
+    if (!skipped.empty()) {
+      acknowledged.insert(acknowledged.end(), skipped.begin(), skipped.end());
+      skipped.clear();
+    }
+    return journal_.removeAcknowledged(acknowledged);
+  };
   for (const PendingOp& op : journal_.entries()) {
     ApiStatus status = api_.pushOp(op);
     if (status == ApiStatus::RateLimited) {
@@ -175,31 +213,33 @@ SyncOutcome ReadwiseSyncEngine::sync() {
         status = api_.pushOp(op);
       }
     }
+    if (status == ApiStatus::NotFound && notFoundHooks_.onNotFound != nullptr) {
+      // Copy the title out before the hook returns: the prompt can run for as
+      // long as the user needs, and forgetDocument below reuses scratchDoc_.
+      char title[TITLE_CAP];
+      title[0] = '\0';
+      if (findDocument(op.id, scratchDoc_)) {
+        copyBounded(title, TITLE_CAP, scratchDoc_.title, strlen(scratchDoc_.title));
+      }
+      const char* detail = api_.lastDetail();
+      const bool drop = notFoundHooks_.onNotFound(notFoundHooks_.ctx, op, title, detail != nullptr ? detail : "");
+      if (drop) {
+        // The server no longer has this document. Drop the local copy so it
+        // does not keep a slot, then drop the journal op so the next sync
+        // does not ask again.
+        forgetDocument(op.id);
+        skipped.push_back(op.seq);
+        continue;
+      }
+    }
     if (status != ApiStatus::Ok) {
       // Name the op before removeAcknowledged, which rewrites the vector this
       // reference points into.
-      const char* verb = "update";
-      const char* where = nullptr;
-      switch (op.op) {
-        case OpType::Delete:
-          verb = "delete";
-          break;
-        case OpType::SetSeen:
-          verb = "seen";
-          break;
-        case OpType::SetLocation:
-          verb = "move";
-          where = locationName(static_cast<Location>(op.payload));
-          break;
-      }
-      if (where != nullptr && where[0] != '\0') {
-        snprintf(step, sizeof(step), "%s %s %s", verb, where, op.id);
-      } else {
-        snprintf(step, sizeof(step), "%s %s", verb, op.id);
-      }
+      formatOpStep(step, sizeof(step), op);
       // Persist what was acknowledged before giving up, so the work already
-      // accepted by the server is not repeated on the next pass.
-      journal_.removeAcknowledged(acknowledged);
+      // accepted by the server is not repeated on the next pass. Ops the
+      // caller already chose to drop go with them.
+      persistResolved();
       noteFailure(outcome, status, step);
       return outcome;
     }
@@ -207,13 +247,19 @@ SyncOutcome ReadwiseSyncEngine::sync() {
     // journal entry is acknowledged: an incremental pull will not mention the
     // deletion, so a record left behind would stay forever.
     if (op.op == OpType::Delete && !forgetDocument(op.id)) {
-      journal_.removeAcknowledged(acknowledged);
+      persistResolved();
       snprintf(step, sizeof(step), "delete local %s", op.id);
       noteFailure(outcome, ApiStatus::ServerError, step);
       return outcome;
     }
     acknowledged.push_back(op.seq);
     ++outcome.pushed;
+  }
+
+  // Drop 404s before the merge. A successful push stays queued until commit so
+  // its override still wins; a dropped 404 must not.
+  if (!skipped.empty() && journal_.removeAcknowledged(skipped)) {
+    skipped.clear();
   }
 
   // --- 3. Pull ------------------------------------------------------------
@@ -227,10 +273,16 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   copyBounded(highestUpdatedAt, TIMESTAMP_CAP, checkpoint.updatedAfter, strlen(checkpoint.updatedAfter));
 
   step[0] = '\0';
-  const ApiStatus pullStatus = pullToStaging(checkpoint, staged, highestUpdatedAt, step, sizeof(step));
+  // Later and Shortlist share the document cap. Once both are empty, pull those
+  // locations without updatedAfter so the cap fills with what is still on the
+  // shelf. The checkpoint is left in place: Feed, and the next incremental
+  // sync, keep their window.
+  const bool refillNonFeed = nonFeedShelfEmpty();
+  const ApiStatus pullStatus =
+      pullToStaging(checkpoint, staged, highestUpdatedAt, step, sizeof(step), refillNonFeed);
   if (pullStatus != ApiStatus::Ok) {
     store_.remove(stagingPath());
-    journal_.removeAcknowledged(acknowledged);
+    persistResolved();
     noteFailure(outcome, pullStatus, step[0] != '\0' ? step : "pull");
     return outcome;
   }
@@ -250,13 +302,13 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   uint16_t retained = 0;
   if (!mergeIntoDocs(stagingPath(), staged, /*carryOverExisting=*/true, /*dropExpired=*/true, indexEntries, retained)) {
     store_.remove(stagingPath());
-    journal_.removeAcknowledged(acknowledged);
+    persistResolved();
     noteFailure(outcome, ApiStatus::Ok, "rebuild");
     return outcome;
   }
   if (!writeIndexes(indexEntries)) {
     store_.remove(stagingPath());
-    journal_.removeAcknowledged(acknowledged);
+    persistResolved();
     noteFailure(outcome, ApiStatus::Ok, "indexes");
     return outcome;
   }
@@ -265,13 +317,13 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   // --- 5. Commit ----------------------------------------------------------
   outcome.failedStage = SyncStage::Committing;
   if (!commitCheckpoint(highestUpdatedAt, retained)) {
-    journal_.removeAcknowledged(acknowledged);
+    persistResolved();
     noteFailure(outcome, ApiStatus::Ok, "checkpoint");
     return outcome;
   }
 
   store_.remove(stagingPath());
-  if (!journal_.removeAcknowledged(acknowledged)) {
+  if (!persistResolved()) {
     // The sync itself committed; failing to trim the journal only means the
     // acknowledged ops are retried next pass, which is harmless: location and
     // seen write the same value again, and a repeated delete is treated as
@@ -286,8 +338,37 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   return outcome;
 }
 
+bool ReadwiseSyncEngine::nonFeedShelfEmpty() {
+  DocsHeader header;
+  uint8_t headerBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, headerBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(headerBuffer, DOCS_HEADER_SIZE, header)) {
+    return true;
+  }
+  uint32_t offset = DOCS_HEADER_SIZE;
+  for (uint16_t i = 0; i < header.recordCount; ++i) {
+    const int read = store_.readRange(docsPath(), offset, recordBuffer_, MAX_ENCODED_RECORD);
+    if (read <= 0) {
+      return false;
+    }
+    size_t consumed = 0;
+    if (!decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_, &consumed) || consumed == 0) {
+      return false;
+    }
+    offset += static_cast<uint32_t>(consumed);
+    applyQueuedOverrides(scratchDoc_);
+    if (journal_.findLatest(scratchDoc_.id, OpType::Delete) != nullptr) {
+      continue;
+    }
+    if (scratchDoc_.location == Location::Later || scratchDoc_.location == Location::Shortlist) {
+      return false;
+    }
+  }
+  return true;
+}
+
 ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::vector<StagedRef>& staged,
-                                            char* highestUpdatedAt, char* step, size_t stepCap) {
+                                            char* highestUpdatedAt, char* step, size_t stepCap, bool refillNonFeed) {
   // A local sink so the staging writes and the id/offset bookkeeping stay
   // together; the engine's scratch buffers are reused rather than reallocated.
   struct Sink : DocumentSink {
@@ -390,7 +471,8 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
     }
 
     ListQuery query;
-    query.updatedAfter = checkpoint.updatedAfter;
+    query.updatedAfter =
+        (refillNonFeed && policy.location != Location::Feed) ? "" : checkpoint.updatedAfter;
     query.location = policy.location;
     query.limit = 100;
 
