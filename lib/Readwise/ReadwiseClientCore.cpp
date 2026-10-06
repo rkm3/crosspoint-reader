@@ -158,6 +158,44 @@ ApiStatus statusFromHttp(int httpStatus) {
   return ApiStatus::ServerError;
 }
 
+void formatHttpDetail(int httpStatus, const char* body, size_t bodyLen, char* out, size_t outCap) {
+  if (out == nullptr || outCap == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (httpStatus < 0) {
+    snprintf(out, outCap, "transport");
+    return;
+  }
+  const int wrote = snprintf(out, outCap, "HTTP %d", httpStatus);
+  if (wrote < 0 || body == nullptr || bodyLen == 0) {
+    return;
+  }
+  size_t pos = static_cast<size_t>(wrote);
+  if (pos + 1 >= outCap) {
+    out[outCap - 1] = '\0';
+    return;
+  }
+  out[pos++] = ' ';
+  bool spaced = true;
+  for (size_t i = 0; i < bodyLen && pos + 1 < outCap; ++i) {
+    const unsigned char c = static_cast<unsigned char>(body[i]);
+    if (c <= ' ') {
+      if (!spaced) {
+        out[pos++] = ' ';
+        spaced = true;
+      }
+      continue;
+    }
+    out[pos++] = static_cast<char>(c);
+    spaced = false;
+  }
+  while (pos > 0 && out[pos - 1] == ' ') {
+    --pos;
+  }
+  out[pos] = '\0';
+}
+
 uint16_t parseRetryAfter(const char* headerValue) {
   if (headerValue == nullptr || headerValue[0] == '\0') {
     return 0;

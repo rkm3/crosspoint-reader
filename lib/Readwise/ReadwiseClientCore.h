@@ -40,6 +40,11 @@ bool buildDeleteUrl(const char* id, char* out, size_t outCap);
 // Maps an HTTP status (or a negative transport failure) to ApiStatus.
 ApiStatus statusFromHttp(int httpStatus);
 
+// A short trace of a failed response, for the sync screen and the log.
+// "HTTP 400 {\"detail\":\"...\"}", or "transport" when the status is negative.
+// Whitespace in the body collapses to single spaces. Truncates to `outCap`.
+void formatHttpDetail(int httpStatus, const char* body, size_t bodyLen, char* out, size_t outCap);
+
 // Parses a retry-after header value. Returns 0 when absent or malformed; the
 // caller treats 0 as "no guidance" and abandons rather than retrying blind.
 uint16_t parseRetryAfter(const char* headerValue);

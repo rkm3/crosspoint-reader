@@ -3,6 +3,7 @@
 #include <Memory.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -25,6 +26,13 @@ constexpr uint32_t DEFAULT_RATE_LIMIT_WAIT_MS = 20000;
 constexpr uint32_t RATE_LIMIT_WAIT_CAP_MS = 30000;
 
 bool sameId(const char* a, const char* b) { return strncmp(a, b, ID_CAP) == 0; }
+
+void writeStep(char* step, size_t stepCap, const char* text) {
+  if (step == nullptr || stepCap == 0) {
+    return;
+  }
+  snprintf(step, stepCap, "%s", text != nullptr ? text : "");
+}
 
 }  // namespace
 
@@ -114,17 +122,35 @@ void ReadwiseSyncEngine::applyQueuedOverrides(Document& doc) const {
   }
 }
 
+void ReadwiseSyncEngine::noteFailure(SyncOutcome& outcome, ApiStatus status, const char* step) {
+  outcome.status = status;
+  const char* http = api_.lastDetail();
+  const bool haveHttp = http != nullptr && http[0] != '\0';
+  const bool haveStep = step != nullptr && step[0] != '\0';
+  if (haveStep && haveHttp) {
+    snprintf(outcome.detail, sizeof(outcome.detail), "%s: %s", step, http);
+  } else if (haveStep) {
+    snprintf(outcome.detail, sizeof(outcome.detail), "%s", step);
+  } else if (haveHttp) {
+    snprintf(outcome.detail, sizeof(outcome.detail), "%s", http);
+  } else {
+    outcome.detail[0] = '\0';
+  }
+}
+
 SyncOutcome ReadwiseSyncEngine::sync() {
   SyncOutcome outcome;
 
   if (!store_.ensureDir(baseDir_)) {
     outcome.failedStage = SyncStage::Idle;
+    noteFailure(outcome, ApiStatus::Ok, "storage");
     return outcome;
   }
 
   // --- 1. Coalesce --------------------------------------------------------
   outcome.failedStage = SyncStage::Coalescing;
   if (!journal_.load()) {
+    noteFailure(outcome, ApiStatus::Ok, "journal");
     return outcome;
   }
   journal_.coalesce();
@@ -133,9 +159,11 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   // Clips go first. A queued delete removes the article directory, and the
   // quote file lives in it.
   outcome.failedStage = SyncStage::Pushing;
-  const ApiStatus highlightStatus = pushPendingHighlights();
+  char step[64];
+  step[0] = '\0';
+  const ApiStatus highlightStatus = pushPendingHighlights(step, sizeof(step));
   if (highlightStatus != ApiStatus::Ok) {
-    outcome.status = highlightStatus;
+    noteFailure(outcome, highlightStatus, step[0] != '\0' ? step : "highlight");
     return outcome;
   }
   std::vector<uint32_t> acknowledged;
@@ -151,7 +179,26 @@ SyncOutcome ReadwiseSyncEngine::sync() {
       // Persist what was acknowledged before giving up, so the work already
       // accepted by the server is not repeated on the next pass.
       journal_.removeAcknowledged(acknowledged);
-      outcome.status = status;
+      const char* verb = "update";
+      const char* where = nullptr;
+      switch (op.op) {
+        case OpType::Delete:
+          verb = "delete";
+          break;
+        case OpType::SetSeen:
+          verb = "seen";
+          break;
+        case OpType::SetLocation:
+          verb = "move";
+          where = locationName(static_cast<Location>(op.payload));
+          break;
+      }
+      if (where != nullptr && where[0] != '\0') {
+        snprintf(step, sizeof(step), "%s %s %s", verb, where, op.id);
+      } else {
+        snprintf(step, sizeof(step), "%s %s", verb, op.id);
+      }
+      noteFailure(outcome, status, step);
       return outcome;
     }
     // The server has accepted the delete. Drop the local copy before the
@@ -159,7 +206,8 @@ SyncOutcome ReadwiseSyncEngine::sync() {
     // deletion, so a record left behind would stay forever.
     if (op.op == OpType::Delete && !forgetDocument(op.id)) {
       journal_.removeAcknowledged(acknowledged);
-      outcome.status = ApiStatus::ServerError;
+      snprintf(step, sizeof(step), "delete local %s", op.id);
+      noteFailure(outcome, ApiStatus::ServerError, step);
       return outcome;
     }
     acknowledged.push_back(op.seq);
@@ -176,11 +224,12 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   char highestUpdatedAt[TIMESTAMP_CAP] = {};
   copyBounded(highestUpdatedAt, TIMESTAMP_CAP, checkpoint.updatedAfter, strlen(checkpoint.updatedAfter));
 
-  const ApiStatus pullStatus = pullToStaging(checkpoint, staged, highestUpdatedAt);
+  step[0] = '\0';
+  const ApiStatus pullStatus = pullToStaging(checkpoint, staged, highestUpdatedAt, step, sizeof(step));
   if (pullStatus != ApiStatus::Ok) {
     store_.remove(stagingPath());
     journal_.removeAcknowledged(acknowledged);
-    outcome.status = pullStatus;
+    noteFailure(outcome, pullStatus, step[0] != '\0' ? step : "pull");
     return outcome;
   }
   // Tombstones (seen items in unread-only locations) are evictions, not
@@ -200,11 +249,13 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   if (!mergeIntoDocs(stagingPath(), staged, /*carryOverExisting=*/true, /*dropExpired=*/true, indexEntries, retained)) {
     store_.remove(stagingPath());
     journal_.removeAcknowledged(acknowledged);
+    noteFailure(outcome, ApiStatus::Ok, "rebuild");
     return outcome;
   }
   if (!writeIndexes(indexEntries)) {
     store_.remove(stagingPath());
     journal_.removeAcknowledged(acknowledged);
+    noteFailure(outcome, ApiStatus::Ok, "indexes");
     return outcome;
   }
   outcome.retained = retained;
@@ -213,6 +264,7 @@ SyncOutcome ReadwiseSyncEngine::sync() {
   outcome.failedStage = SyncStage::Committing;
   if (!commitCheckpoint(highestUpdatedAt, retained)) {
     journal_.removeAcknowledged(acknowledged);
+    noteFailure(outcome, ApiStatus::Ok, "checkpoint");
     return outcome;
   }
 
@@ -233,7 +285,7 @@ SyncOutcome ReadwiseSyncEngine::sync() {
 }
 
 ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::vector<StagedRef>& staged,
-                                            char* highestUpdatedAt) {
+                                            char* highestUpdatedAt, char* step, size_t stepCap) {
   // A local sink so the staging writes and the id/offset bookkeeping stay
   // together; the engine's scratch buffers are reused rather than reallocated.
   struct Sink : DocumentSink {
@@ -308,6 +360,7 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
   };
 
   if (!store_.beginWrite(stagingPath())) {
+    writeStep(step, stepCap, "pull storage");
     return ApiStatus::NetworkError;
   }
 
@@ -349,13 +402,12 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
           response = api_.fetchPage(query, sink);
         }
       }
-      if (response.status != ApiStatus::Ok) {
+      if (response.status != ApiStatus::Ok || sink.failed) {
         store_.abortWrite();
-        return response.status;
-      }
-      if (sink.failed) {
-        store_.abortWrite();
-        return ApiStatus::ParseError;
+        if (step != nullptr && stepCap > 0) {
+          snprintf(step, stepCap, "pull %s", locationName(policy.location));
+        }
+        return response.status != ApiStatus::Ok ? response.status : ApiStatus::ParseError;
       }
       // Once the location's cap is reached, further pages would only stream
       // documents the sink refuses -- stop paginating.
@@ -372,6 +424,7 @@ ApiStatus ReadwiseSyncEngine::pullToStaging(const Checkpoint& checkpoint, std::v
   }
 
   if (!store_.commitWrite()) {
+    writeStep(step, stepCap, "pull commit");
     return ApiStatus::ParseError;
   }
   return ApiStatus::Ok;
@@ -1080,7 +1133,7 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   return indexHighlight(id);
 }
 
-ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending) {
+ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap) {
   stillPending = false;
   const std::string path = highlightPath(id);
   const long fileSize = store_.size(path);
@@ -1137,6 +1190,9 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
       }
       if (status != ApiStatus::Ok) {
         stillPending = true;
+        if (step != nullptr && stepCap > 0) {
+          snprintf(step, stepCap, "highlight %s", id != nullptr ? id : "");
+        }
         return status;
       }
       const uint8_t posted = static_cast<uint8_t>(flags | HIGHLIGHT_FLAG_POSTED);
@@ -1150,7 +1206,7 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
   return ApiStatus::Ok;
 }
 
-ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
+ApiStatus ReadwiseSyncEngine::pushPendingHighlights(char* step, size_t stepCap) {
   const std::string path = highlightIndexPath();
   uint8_t header[3] = {};
   if (store_.readRange(path, 0, header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
@@ -1162,11 +1218,13 @@ ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
     return ApiStatus::Ok;
   }
   if (!store_.beginWrite(path)) {
+    writeStep(step, stepCap, "highlight index");
     return ApiStatus::ServerError;
   }
   uint8_t placeholder[3] = {HIGHLIGHT_INDEX_VERSION, 0, 0};
   if (!store_.writeChunk(placeholder, sizeof(placeholder))) {
     store_.abortWrite();
+    writeStep(step, stepCap, "highlight index");
     return ApiStatus::ServerError;
   }
   uint16_t kept = 0;
@@ -1175,11 +1233,12 @@ ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
     const size_t at = sizeof(header) + static_cast<size_t>(i) * ID_CAP;
     if (store_.readRange(path, at, reinterpret_cast<uint8_t*>(id), ID_CAP) != ID_CAP) {
       store_.abortWrite();
+      writeStep(step, stepCap, "highlight index");
       return ApiStatus::ServerError;
     }
     id[ID_CAP - 1] = '\0';
     bool stillPending = false;
-    const ApiStatus status = pushHighlightFile(id, stillPending);
+    const ApiStatus status = pushHighlightFile(id, stillPending, step, stepCap);
     if (status != ApiStatus::Ok) {
       store_.abortWrite();
       return status;
@@ -1189,6 +1248,7 @@ ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
     }
     if (!store_.writeChunk(reinterpret_cast<const uint8_t*>(id), ID_CAP)) {
       store_.abortWrite();
+      writeStep(step, stepCap, "highlight index");
       return ApiStatus::ServerError;
     }
     ++kept;
@@ -1196,6 +1256,7 @@ ApiStatus ReadwiseSyncEngine::pushPendingHighlights() {
   uint8_t nextHeader[3] = {HIGHLIGHT_INDEX_VERSION, static_cast<uint8_t>(kept & 0xFF), static_cast<uint8_t>(kept >> 8)};
   if (!store_.patchWrite(0, nextHeader, sizeof(nextHeader)) || !store_.commitWrite()) {
     store_.abortWrite();
+    writeStep(step, stepCap, "highlight index");
     return ApiStatus::ServerError;
   }
   return ApiStatus::Ok;

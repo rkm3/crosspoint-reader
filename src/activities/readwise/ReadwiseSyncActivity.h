@@ -44,11 +44,14 @@ class ReadwiseSyncActivity final : public Activity {
   void performSync();
   void renderComplete() const;
   void renderDownloading() const;
+  void renderFailed() const;
 
   enum class DownloadStep : uint8_t { Article, Image, RateLimit };
 
   State state = State::CONNECTING;
   std::string statusMessage;
+  // Step and server snippet when sync fails. Diagnostic text, not a translation.
+  char failureDetail[readwise::SyncOutcome::DETAIL_CAP] = {};
   uint16_t pushed = 0;
   uint16_t pulled = 0;
   uint16_t bodiesDone = 0;

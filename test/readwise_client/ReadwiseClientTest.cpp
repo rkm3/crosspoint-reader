@@ -103,6 +103,24 @@ TEST(ReadwiseClientCore, StatusMapping) {
   EXPECT_EQ(statusFromHttp(-1), ApiStatus::NetworkError);
 }
 
+TEST(ReadwiseClientCore, HttpDetailKeepsAShortServerTrace) {
+  char out[80];
+  const char* body = "{\"detail\":\"bad\\nid\"}\n";
+  formatHttpDetail(400, body, strlen(body), out, sizeof(out));
+  EXPECT_STREQ(out, "HTTP 400 {\"detail\":\"bad id\"}");
+
+  formatHttpDetail(500, nullptr, 0, out, sizeof(out));
+  EXPECT_STREQ(out, "HTTP 500");
+
+  formatHttpDetail(-1, "ignored", 7, out, sizeof(out));
+  EXPECT_STREQ(out, "transport");
+
+  char tiny[12];
+  formatHttpDetail(400, "{\"detail\":\"long\"}", 16, tiny, sizeof(tiny));
+  EXPECT_EQ(strlen(tiny), sizeof(tiny) - 1);
+  EXPECT_EQ(tiny[sizeof(tiny) - 1], '\0');
+}
+
 TEST(ReadwiseClientCore, RetryAfterParsing) {
   EXPECT_EQ(parseRetryAfter("16"), 16);
   EXPECT_EQ(parseRetryAfter(""), 0);

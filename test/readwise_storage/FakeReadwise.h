@@ -266,6 +266,9 @@ class FakeApi : public readwise::ReadwiseApi {
   }
 
   int pushAttempts = 0;
+
+  const char* detail = "";
+  const char* lastDetail() const override { return detail; }
 };
 
 inline readwise::Document makeDoc(const char* id, readwise::Location location, const char* updatedAt,

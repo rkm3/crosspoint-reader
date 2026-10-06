@@ -104,6 +104,10 @@ class ReadwiseApi {
   // on-demand as the retry path when a document is opened. `retryAfterSeconds`
   // is set on RateLimited.
   virtual ApiStatus fetchBody(const char* id, BodySink& sink, uint16_t* retryAfterSeconds) = 0;
+
+  // Trace of the most recent failed call, or empty. Valid until the next call.
+  // The HTTP client fills this with the status and a short response snippet.
+  virtual const char* lastDetail() const { return ""; }
 };
 
 }  // namespace readwise

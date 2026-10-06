@@ -84,6 +84,10 @@ struct SyncOutcome {
   uint16_t pushed = 0;
   uint16_t pulled = 0;
   uint16_t retained = 0;
+  // What failed, for the screen and the log. Empty on success.
+  // "delete <id>: HTTP 400 {...}", "highlight <id>", "pull later".
+  static constexpr size_t DETAIL_CAP = 160;
+  char detail[DETAIL_CAP] = {};
 };
 
 // Per-category totals. `named` is indexed by Category for the dense prefix
@@ -277,7 +281,10 @@ class ReadwiseSyncEngine {
     char lastMovedAt[TIMESTAMP_CAP];
   };
 
-  ApiStatus pullToStaging(const Checkpoint& checkpoint, std::vector<StagedRef>& staged, char* highestUpdatedAt);
+  ApiStatus pullToStaging(const Checkpoint& checkpoint, std::vector<StagedRef>& staged, char* highestUpdatedAt,
+                          char* step, size_t stepCap);
+  // Copies `step` into outcome.detail, appending the API's lastDetail when set.
+  void noteFailure(SyncOutcome& outcome, ApiStatus status, const char* step);
   // Rewrites docs.bin from `sourcePath`, whose records `refs` locates. When
   // `carryOverExisting` is set, documents already in docs.bin that `refs` does
   // not supersede are appended until the cap is reached -- that is the sync
@@ -304,9 +311,10 @@ class ReadwiseSyncEngine {
   bool indexHighlight(const char* id);
   bool unindexHighlight(const char* id);
   // Posts unposted clips. A transport failure leaves the rest queued.
-  ApiStatus pushPendingHighlights();
+  // `step` receives a short label ("highlight <id>", "highlight index") on failure.
+  ApiStatus pushPendingHighlights(char* step, size_t stepCap);
   // One document. `stillPending` is true when a clip remains unposted.
-  ApiStatus pushHighlightFile(const char* id, bool& stillPending);
+  ApiStatus pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap);
 
   std::string stagingPath() const { return baseDir_ + "/incoming.bin"; }
 

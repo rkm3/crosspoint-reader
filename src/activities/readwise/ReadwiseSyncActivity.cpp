@@ -9,6 +9,8 @@
 #include <WiFi.h>
 
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 #include "ReadwiseCredentialStore.h"
 #include "ReadwiseImageFetcher.h"
@@ -198,6 +200,7 @@ void ReadwiseSyncActivity::performSync() {
       // downloaded articles stay cached and the rest retry on demand.
       state = State::FAILED;
       statusMessage = I18N.get(ReadwiseUi::statusStrId(bodies.status));
+      readwise::copyBounded(failureDetail, sizeof(failureDetail), api.lastDetail(), strlen(api.lastDetail()));
     }
     requestUpdate();
     return;
@@ -209,8 +212,9 @@ void ReadwiseSyncActivity::performSync() {
     state = State::FAILED;
     statusMessage = outcome.status == readwise::ApiStatus::Ok ? tr(STR_READWISE_SYNC_FAILED)
                                                               : I18N.get(ReadwiseUi::statusStrId(outcome.status));
-    LOG_ERR("RWSYNC", "Sync failed: stage=%u status=%s", static_cast<unsigned>(outcome.failedStage),
-            readwise::apiStatusName(outcome.status));
+    readwise::copyBounded(failureDetail, sizeof(failureDetail), outcome.detail, strlen(outcome.detail));
+    LOG_ERR("RWSYNC", "Sync failed: stage=%u status=%s detail=%s", static_cast<unsigned>(outcome.failedStage),
+            readwise::apiStatusName(outcome.status), failureDetail);
   }
   requestUpdate();
 }
@@ -381,6 +385,37 @@ void ReadwiseSyncActivity::renderDownloading() const {
   renderer.drawCenteredText(UI_10_FONT_ID, y, shown, true);
 }
 
+// The status line is the translated cause. The trace under it names the step
+// (highlight, delete, move, pull) and, when the server sent one, the HTTP
+// status and a short response snippet. drawPopup is one line and does not wrap.
+void ReadwiseSyncActivity::renderFailed() const {
+  const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID) + 4;
+  const int available = pageWidth - metrics.contentSidePadding * 2;
+  const int x = metrics.contentSidePadding;
+  const int top = metrics.topPadding + metrics.headerHeight;
+  const int bottom = pageHeight - metrics.buttonHintsHeight;
+
+  const auto lines = failureDetail[0] != '\0' && available > 0
+                         ? renderer.wrappedText(UI_10_FONT_ID, failureDetail, available, 8)
+                         : std::vector<std::string>{};
+  const int gap = lines.empty() ? 0 : 8;
+  const int block = lineHeight + gap + static_cast<int>(lines.size()) * lineHeight;
+  int y = top + (bottom - top - block) / 2;
+  if (y < top) {
+    y = top;
+  }
+
+  renderer.drawCenteredText(UI_10_FONT_ID, y, statusMessage.c_str(), true, EpdFontFamily::BOLD);
+  y += lineHeight + gap;
+  for (const auto& line : lines) {
+    renderer.drawText(UI_10_FONT_ID, x, y, line.c_str());
+    y += lineHeight;
+  }
+}
+
 void ReadwiseSyncActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto pageWidth = renderer.getScreenWidth();
@@ -401,7 +436,7 @@ void ReadwiseSyncActivity::render(RenderLock&&) {
       renderComplete();
       break;
     case State::FAILED:
-      GUI.drawPopup(renderer, statusMessage.c_str());
+      renderFailed();
       break;
     case State::NO_TOKEN:
       GUI.drawPopup(renderer, tr(STR_READWISE_SET_TOKEN_FIRST));

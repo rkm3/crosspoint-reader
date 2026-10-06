@@ -124,6 +124,7 @@ TEST(ReadwiseSync, NetworkFailureDuringPullLeavesNoCheckpoint) {
   EXPECT_FALSE(outcome.ok);
   EXPECT_EQ(outcome.failedStage, SyncStage::Pulling);
   EXPECT_EQ(outcome.status, ApiStatus::NetworkError);
+  EXPECT_STREQ(outcome.detail, "pull later");
   EXPECT_FALSE(f.store.has(f.engine.checkpointPath()));
 }
 
@@ -228,11 +229,16 @@ TEST(ReadwiseSync, FailedPushPreservesUnacknowledgedOps) {
   ASSERT_TRUE(f.engine.queueLocationChange("doc2", Location::Archive, kT1));
   ASSERT_TRUE(f.engine.queueLocationChange("doc3", Location::Archive, kT1));
   f.api.failPushAt = 2;
+  f.api.pushStatus = ApiStatus::ServerError;
+  f.api.detail = "HTTP 400 {\"detail\":\"no\"}";
 
   const SyncOutcome outcome = f.engine.sync();
   EXPECT_FALSE(outcome.ok);
   EXPECT_EQ(outcome.failedStage, SyncStage::Pushing);
+  EXPECT_EQ(outcome.status, ApiStatus::ServerError);
   EXPECT_EQ(outcome.pushed, 1);
+  EXPECT_NE(std::string(outcome.detail).find("move archive doc2"), std::string::npos);
+  EXPECT_NE(std::string(outcome.detail).find("HTTP 400"), std::string::npos);
 
   ReadwiseJournal reloaded(f.store, f.engine.journalPath());
   ASSERT_TRUE(reloaded.load());
@@ -872,6 +878,8 @@ TEST(ReadwiseSync, HighlightPushFailureStaysQueued) {
   const SyncOutcome failed = f.engine.sync();
   EXPECT_FALSE(failed.ok);
   EXPECT_EQ(failed.failedStage, SyncStage::Pushing);
+  EXPECT_NE(std::string(failed.detail).find("highlight"), std::string::npos);
+  EXPECT_NE(std::string(failed.detail).find(id), std::string::npos);
   EXPECT_TRUE(f.api.highlights.empty());
 
   f.api.failHighlights = false;

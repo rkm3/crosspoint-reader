@@ -5,6 +5,7 @@
 #include <Memory.h>
 #include <SecureHttpClient.h>
 
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -50,6 +51,9 @@ void configureClient(freeink::SecureHttpClient& http, const std::string& token) 
   http.addHeader("Authorization", std::string("Token ") + token);
 }
 
+// First bytes of an error body. Enough for Readwise's `{"detail":...}`.
+constexpr size_t ERROR_SNIP_CAP = 80;
+
 uint16_t retryAfterFrom(const freeink::SecureHttpClient& http) {
   // SecureHttpClient lowercases header names on receipt and getHeader()
   // lowercases the lookup, so the server's lowercase "retry-after" is found
@@ -60,6 +64,23 @@ uint16_t retryAfterFrom(const freeink::SecureHttpClient& http) {
 }  // namespace
 
 HttpReadwiseApi::HttpReadwiseApi(std::string token) : token(std::move(token)) {}
+
+void HttpReadwiseApi::noteLocal(const char* text) {
+  snprintf(detail_, sizeof(detail_), "%s", text != nullptr ? text : "");
+  LOG_ERR("RWAPI", "%s", detail_);
+}
+
+void HttpReadwiseApi::noteHttpResult(int status, const char* body, size_t bodyLen) {
+  detail_[0] = '\0';
+  const ApiStatus mapped = statusFromHttp(status);
+  if (mapped == ApiStatus::Ok) {
+    return;
+  }
+  formatHttpDetail(status, body, bodyLen, detail_, sizeof(detail_));
+  if (mapped == ApiStatus::ServerError) {
+    LOG_ERR("RWAPI", "%s", detail_);
+  }
+}
 
 ApiStatus HttpReadwiseApi::checkAuth() {
   if (token.empty()) {
@@ -105,13 +126,26 @@ ApiStatus HttpReadwiseApi::runListRequest(const char* url, DocumentSink& docSink
   configureClient(http, token);
 
   ReadwiseListParser* parserPtr = parser.get();
-  const int status = http.GET([parserPtr](const uint8_t* data, size_t len) {
+  // Error bodies are small JSON. Keep a prefix so a 4xx/5xx can be shown;
+  // the success path streams into the parser and does not retain this.
+  char snip[ERROR_SNIP_CAP];
+  size_t snipLen = 0;
+  char* snipPtr = snip;
+  const int status = http.GET([parserPtr, snipPtr, &snipLen](const uint8_t* data, size_t len) {
+    if (snipLen + 1 < ERROR_SNIP_CAP) {
+      const size_t room = ERROR_SNIP_CAP - 1 - snipLen;
+      const size_t n = len < room ? len : room;
+      memcpy(snipPtr + snipLen, data, n);
+      snipLen += n;
+      snipPtr[snipLen] = '\0';
+    }
     // Returning false aborts the transfer as soon as parsing fails or a sink
     // says stop; no point paying for bytes nothing will consume.
     return parserPtr->feed(reinterpret_cast<const char*>(data), len);
   });
 
   LOG_DBG("RWAPI", "GET %s -> %d (heap %u)", url, status, (unsigned)ESP.getFreeHeap());
+  noteHttpResult(status, snip, snipLen);
 
   if (status == 429 && retryAfterSeconds != nullptr) {
     *retryAfterSeconds = retryAfterFrom(http);
@@ -166,10 +200,12 @@ ApiStatus HttpReadwiseApi::fetchBody(const char* id, BodySink& sink, uint16_t* r
 
 ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, const char* author,
                                         const char* sourceUrl) {
+  detail_[0] = '\0';
   if (token.empty()) {
     return ApiStatus::NoCredentials;
   }
   if (text == nullptr || text[0] == '\0') {
+    noteLocal("empty highlight");
     return ApiStatus::ServerError;
   }
   // Escaping can double the quote, title, author, and URL. 2 KB covers that
@@ -181,7 +217,7 @@ ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, co
     return ApiStatus::LowMemory;
   }
   if (!buildHighlightBody(text, title, author, sourceUrl, body.get(), kBodyCap)) {
-    LOG_ERR("RWAPI", "Highlight body did not fit");
+    noteLocal("highlight body too large");
     return ApiStatus::ServerError;
   }
   if (insufficientHeap()) {
@@ -194,19 +230,22 @@ ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, co
   configureClient(http, token);
   http.addHeader("Content-Type", "application/json");
   const int status = http.sendRequest("POST", body.get());
+  const std::string& response = http.getString();
+  noteHttpResult(status, response.c_str(), response.size());
   http.end();
   LOG_DBG("RWAPI", "POST highlight -> %d", status);
   return statusFromHttp(status);
 }
 
 ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
+  detail_[0] = '\0';
   if (token.empty()) {
     return ApiStatus::NoCredentials;
   }
   char url[URL_CAP];
   if (op.op == OpType::Delete) {
     if (!buildDeleteUrl(op.id, url, sizeof(url))) {
-      LOG_ERR("RWAPI", "Unpushable delete for %s", op.id);
+      noteLocal("unpushable delete");
       return ApiStatus::ServerError;
     }
     if (insufficientHeap()) {
@@ -218,6 +257,10 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
     }
     configureClient(http, token);
     const int status = http.sendRequest("DELETE", "");
+    if (status != 404) {
+      const std::string& response = http.getString();
+      noteHttpResult(status, response.c_str(), response.size());
+    }
     http.end();
     LOG_DBG("RWAPI", "DELETE %s -> %d", url, status);
     // A repeated delete of a document the server already removed. Treating it
@@ -230,7 +273,7 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
 
   char body[64];
   if (!buildUpdateUrl(op.id, url, sizeof(url)) || !buildUpdateBody(op, body, sizeof(body))) {
-    LOG_ERR("RWAPI", "Unpushable op %u for %s", static_cast<unsigned>(op.op), op.id);
+    noteLocal("unpushable update");
     return ApiStatus::ServerError;
   }
   if (insufficientHeap()) {
@@ -244,6 +287,8 @@ ApiStatus HttpReadwiseApi::pushOp(const PendingOp& op) {
   configureClient(http, token);
   http.addHeader("Content-Type", "application/json");
   const int status = http.sendRequest("PATCH", body);
+  const std::string& response = http.getString();
+  noteHttpResult(status, response.c_str(), response.size());
   http.end();
 
   LOG_DBG("RWAPI", "PATCH %s -> %d", url, status);
