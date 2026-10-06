@@ -140,6 +140,15 @@ class ReadwiseSyncEngine {
   // Loads the documents at those location-index offsets, in the order given.
   bool readIndexSlots(Location location, const uint16_t* slots, uint16_t slotCount, std::vector<Document>& out);
 
+  // docs.bin record indexes for Later and Shortlist documents on one side of
+  // `minWords`, newest `lastMovedAt` first. `minWords` itself belongs to the
+  // long side. A zero word count is on neither side. An empty `author` skips
+  // that test. Feed is not included.
+  bool collectLengthSlots(uint32_t minWords, bool longReads, const char* author, std::vector<uint16_t>& out);
+
+  // Loads documents by docs.bin record index, in the order given.
+  bool readRecords(const uint16_t* recordIndexes, uint16_t count, std::vector<Document>& out);
+
   // Reads one page of a location index without loading the rest. `out` is
   // cleared and filled with at most `count` documents.
   bool readIndexPage(Location location, uint16_t offset, uint16_t count, std::vector<Document>& out);
@@ -279,8 +288,10 @@ class ReadwiseSyncEngine {
   bool commitCheckpoint(const char* updatedAfter, uint16_t docCount);
   void applyQueuedOverrides(Document& doc) const;
   bool readIndexBounds(Location location, uint16_t& total, DocsHeader& header);
-  // Fills scratchDoc_ from one location-index slot.
-  bool loadIndexedDocument(Location location, uint16_t slot, const DocsHeader& header);
+  // Fills scratchDoc_ from one location-index slot. `recordIndex` receives the
+  // docs.bin record number when non-null.
+  bool loadIndexedDocument(Location location, uint16_t slot, const DocsHeader& header, uint16_t* recordIndex = nullptr);
+  bool loadRecord(uint16_t recordIndex, const DocsHeader& header);
   std::string notePath(const char* id) const;
 
   std::string stagingPath() const { return baseDir_ + "/incoming.bin"; }

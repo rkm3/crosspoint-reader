@@ -899,13 +899,7 @@ bool ReadwiseSyncEngine::readIndexBounds(const Location location, uint16_t& tota
   return true;
 }
 
-bool ReadwiseSyncEngine::loadIndexedDocument(const Location location, const uint16_t slot, const DocsHeader& header) {
-  uint8_t entry[INDEX_ENTRY_SIZE];
-  const size_t entryOffset = INDEX_HEADER_SIZE + static_cast<size_t>(slot) * INDEX_ENTRY_SIZE;
-  if (store_.readRange(indexPath(location), entryOffset, entry, INDEX_ENTRY_SIZE) != static_cast<int>(INDEX_ENTRY_SIZE)) {
-    return false;
-  }
-  const uint16_t recordIndex = decodeIndexEntry(entry);
+bool ReadwiseSyncEngine::loadRecord(const uint16_t recordIndex, const DocsHeader& header) {
   if (recordIndex >= header.recordCount) {
     return false;
   }
@@ -918,6 +912,21 @@ bool ReadwiseSyncEngine::loadIndexedDocument(const Location location, const uint
                                 (static_cast<uint32_t>(lutEntry[2]) << 16) | (static_cast<uint32_t>(lutEntry[3]) << 24);
   const int read = store_.readRange(docsPath(), recordOffset, recordBuffer_, MAX_ENCODED_RECORD);
   return read > 0 && decodeDocument(recordBuffer_, static_cast<size_t>(read), scratchDoc_);
+}
+
+bool ReadwiseSyncEngine::loadIndexedDocument(const Location location, const uint16_t slot, const DocsHeader& header,
+                                             uint16_t* recordIndexOut) {
+  uint8_t entry[INDEX_ENTRY_SIZE];
+  const size_t entryOffset = INDEX_HEADER_SIZE + static_cast<size_t>(slot) * INDEX_ENTRY_SIZE;
+  if (store_.readRange(indexPath(location), entryOffset, entry, INDEX_ENTRY_SIZE) !=
+      static_cast<int>(INDEX_ENTRY_SIZE)) {
+    return false;
+  }
+  const uint16_t recordIndex = decodeIndexEntry(entry);
+  if (recordIndexOut != nullptr) {
+    *recordIndexOut = recordIndex;
+  }
+  return loadRecord(recordIndex, header);
 }
 
 bool ReadwiseSyncEngine::collectAuthorSlots(const Location location, const char* author, std::vector<uint16_t>& out) {
@@ -938,6 +947,84 @@ bool ReadwiseSyncEngine::collectAuthorSlots(const Location location, const char*
     if (strncmp(scratchDoc_.author, author, AUTHOR_CAP) == 0) {
       out.push_back(i);
     }
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::collectLengthSlots(const uint32_t minWords, const bool longReads, const char* author,
+                                            std::vector<uint16_t>& out) {
+  out.clear();
+  // lastMovedAt is the merge key across the two indexes and is only on the
+  // record. The dates live for this scan; the caller keeps the record numbers.
+  struct Hit {
+    uint16_t recordIndex;
+    char lastMovedAt[TIMESTAMP_CAP];
+  };
+  std::vector<Hit> hits;
+  hits.reserve(documentCap_);
+
+  const Location sources[] = {Location::Later, Location::Shortlist};
+  for (const Location location : sources) {
+    uint16_t total = 0;
+    DocsHeader header;
+    if (!readIndexBounds(location, total, header)) {
+      if (indexCount(location) == 0) {
+        continue;
+      }
+      return false;
+    }
+    for (uint16_t i = 0; i < total; ++i) {
+      uint16_t recordIndex = 0;
+      if (!loadIndexedDocument(location, i, header, &recordIndex)) {
+        out.clear();
+        return false;
+      }
+      const uint32_t words = scratchDoc_.wordCount;
+      const bool onSide = longReads ? (words >= minWords) : (words > 0 && words < minWords);
+      if (!onSide) {
+        continue;
+      }
+      if (author != nullptr && author[0] != '\0' && strncmp(scratchDoc_.author, author, AUTHOR_CAP) != 0) {
+        continue;
+      }
+      Hit hit;
+      hit.recordIndex = recordIndex;
+      copyBounded(hit.lastMovedAt, TIMESTAMP_CAP, scratchDoc_.lastMovedAt, strlen(scratchDoc_.lastMovedAt));
+      hits.push_back(hit);
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+    return strncmp(a.lastMovedAt, b.lastMovedAt, TIMESTAMP_CAP) > 0;
+  });
+  out.reserve(hits.size());
+  for (const Hit& hit : hits) {
+    out.push_back(hit.recordIndex);
+  }
+  return true;
+}
+
+bool ReadwiseSyncEngine::readRecords(const uint16_t* recordIndexes, const uint16_t count, std::vector<Document>& out) {
+  out.clear();
+  if (count == 0) {
+    return true;
+  }
+  if (recordIndexes == nullptr) {
+    return false;
+  }
+  DocsHeader header;
+  uint8_t docsHeaderBuffer[DOCS_HEADER_SIZE];
+  if (store_.readRange(docsPath(), 0, docsHeaderBuffer, DOCS_HEADER_SIZE) != static_cast<int>(DOCS_HEADER_SIZE) ||
+      !decodeDocsHeader(docsHeaderBuffer, DOCS_HEADER_SIZE, header)) {
+    return false;
+  }
+  out.reserve(count);
+  for (uint16_t i = 0; i < count; ++i) {
+    if (!loadRecord(recordIndexes[i], header)) {
+      out.clear();
+      return false;
+    }
+    out.push_back(scratchDoc_);
   }
   return true;
 }

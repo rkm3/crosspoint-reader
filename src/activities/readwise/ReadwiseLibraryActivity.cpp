@@ -99,9 +99,8 @@ void ReadwiseLibraryActivity::migrateLegacyTextBodies() {
 void ReadwiseLibraryActivity::onEnter() {
   // Restore the shelf before the base onEnter, which resets the active tab's
   // nav. activeTab() is locationIndex.
-  constexpr auto locationCount = static_cast<uint8_t>(LOCATION_COUNT);
-  locationIndex =
-      APP_STATE.readwiseLocationIndex < locationCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
+  constexpr auto tabCount = static_cast<uint8_t>(TAB_COUNT);
+  locationIndex = APP_STATE.readwiseLocationIndex < tabCount ? static_cast<int>(APP_STATE.readwiseLocationIndex) : 0;
   UiTabListActivity::onEnter();
   // Every shelf starts on Sync now, matching the old single-list selection.
   // Switching away and back keeps that tab's later scroll position.
@@ -154,7 +153,20 @@ void ReadwiseLibraryActivity::rememberLocation() {
 void ReadwiseLibraryActivity::reloadCounts() {
   window.clear();
   windowStart = 0;
-  if (authorFilterActive() && engine != nullptr) {
+  if (engine == nullptr) {
+    authorSlots.clear();
+    lengthSlots.clear();
+    docCount = 0;
+  } else if (lengthTab()) {
+    authorSlots.clear();
+    const char* author = authorFilterActive() ? authorFilter : nullptr;
+    if (!engine->collectLengthSlots(LONG_READ_WORDS, locationIndex == LONG_TAB, author, lengthSlots)) {
+      LOG_ERR("RWLIB", "Length list failed");
+      lengthSlots.clear();
+    }
+    docCount = static_cast<uint16_t>(lengthSlots.size());
+  } else if (authorFilterActive()) {
+    lengthSlots.clear();
     if (!engine->collectAuthorSlots(LOCATIONS[locationIndex], authorFilter, authorSlots)) {
       LOG_ERR("RWLIB", "Author filter failed");
       authorFilter[0] = '\0';
@@ -165,7 +177,8 @@ void ReadwiseLibraryActivity::reloadCounts() {
     }
   } else {
     authorSlots.clear();
-    docCount = engine ? engine->indexCount(LOCATIONS[locationIndex]) : 0;
+    lengthSlots.clear();
+    docCount = engine->indexCount(LOCATIONS[locationIndex]);
   }
   auto& n = activeNav();
   int selected = n.selected.load();
@@ -189,7 +202,11 @@ void ReadwiseLibraryActivity::ensureWindow(const int docIndex) {
   windowStart = (docIndex / WINDOW_SIZE) * WINDOW_SIZE;
   const uint16_t wanted = static_cast<uint16_t>(std::min<int>(WINDOW_SIZE, static_cast<int>(docCount) - windowStart));
   bool loaded = false;
-  if (authorFilterActive()) {
+  if (lengthTab()) {
+    if (windowStart >= 0 && windowStart + wanted <= static_cast<int>(lengthSlots.size())) {
+      loaded = engine->readRecords(lengthSlots.data() + windowStart, wanted, window);
+    }
+  } else if (authorFilterActive()) {
     if (windowStart >= 0 && windowStart + wanted <= static_cast<int>(authorSlots.size())) {
       loaded = engine->readIndexSlots(LOCATIONS[locationIndex], authorSlots.data() + windowStart, wanted, window);
     }
@@ -211,7 +228,7 @@ const readwise::Document* ReadwiseLibraryActivity::docAt(const int docIndex) {
 }
 
 void ReadwiseLibraryActivity::selectTab(const int index) {
-  if (index < 0 || index >= LOCATION_COUNT || index == locationIndex) {
+  if (index < 0 || index >= TAB_COUNT || index == locationIndex) {
     return;
   }
   // The filter is a view of one shelf. Switching shelves drops it.
@@ -225,6 +242,12 @@ void ReadwiseLibraryActivity::selectTab(const int index) {
 void ReadwiseLibraryActivity::jumpToLocation(const int index) { selectTab(index); }
 
 const char* ReadwiseLibraryActivity::tabLabel(const int index) const {
+  if (index == LONG_TAB) {
+    return tr(STR_READWISE_LONG_READS);
+  }
+  if (index == QUICK_TAB) {
+    return tr(STR_READWISE_QUICK_READS);
+  }
   if (index < 0 || index >= LOCATION_COUNT) {
     return "";
   }
@@ -238,11 +261,11 @@ void ReadwiseLibraryActivity::onTabAction(const int index) {
 
 void ReadwiseLibraryActivity::stepTab(const int direction) {
   int next = locationIndex + (direction >= 0 ? 1 : -1);
-  if (next >= LOCATION_COUNT) {
+  if (next >= TAB_COUNT) {
     next = 0;
   }
   if (next < 0) {
-    next = LOCATION_COUNT - 1;
+    next = TAB_COUNT - 1;
   }
   selectTab(next);
 }
@@ -769,7 +792,8 @@ void ReadwiseLibraryActivity::pushDelete() {
     LOG_ERR("RWLIB", "Could not queue delete");
     return;
   }
-  const bool online = READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0);
+  const bool online = READWISE_STORE.hasToken() && WiFi.status() == WL_CONNECTED &&
+                      WiFi.localIP() != IPAddress(0, 0, 0, 0);
   if (!online) {
     {
       RenderLock lock(*this);

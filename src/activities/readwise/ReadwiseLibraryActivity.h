@@ -16,7 +16,9 @@
  * Offline browser for the synced Readwise locations.
  *
  * Reads only the local index and metadata files -- no network. Later,
- * Shortlist, and Feed are tabs; each keeps its own selection and scroll.
+ * Shortlist, and Feed are shelves. Long Reads and Quick Reads are views of
+ * Later and Shortlist split by word count. Each tab keeps its own selection
+ * and scroll.
  * Row 0 is "Sync now" (which pushes ReadwiseSyncActivity). A document row
  * opens a preamble; Confirm there opens the cached body or downloads it.
  * A long press opens the entry menu. Holding Left or Right still sends the
@@ -28,11 +30,7 @@
 class ReadwiseLibraryActivity final : public UiTabListActivity {
  public:
   explicit ReadwiseLibraryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : UiTabListActivity("ReadwiseLibrary", renderer, mappedInput, true) {
-    // Three short labels. A full-slot pill would stretch across a third of
-    // the screen; cap the pill and leave the equal-width slots where they are.
-    tabPillMaxPad = 16;
-  }
+      : UiTabListActivity("ReadwiseLibrary", renderer, mappedInput, true) {}
 
   void onEnter() override;
   void onExit() override;
@@ -63,7 +61,7 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void drawFooter() override;
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
 
-  int tabCount() const override { return LOCATION_COUNT; }
+  int tabCount() const override { return TAB_COUNT; }
   int activeTab() const override { return locationIndex; }
   const char* tabLabel(int index) const override;
   void onTabAction(int index) override;
@@ -85,6 +83,7 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   void applyAuthorFilter(const char* author);
   void clearAuthorFilter();
   bool authorFilterActive() const { return authorFilter[0] != '\0'; }
+  bool lengthTab() const { return locationIndex >= LOCATION_COUNT; }
   // Long-pressing a location button sends the selected article there instead
   // of switching to that view. Returns true while the button is held, so the
   // caller swallows the frame.
@@ -108,9 +107,15 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
 
   State state = State::LIST;
 
-  // The library views. Index 0 (Later) is the default; leftTargetIndex and
-  // rightTargetIndex encode the button mapping on boards that have Left/Right.
+  // Shelves the API knows, then two length views that are not locations.
+  // Index 0 (Later) is the default. leftTargetIndex and rightTargetIndex
+  // stay inside the shelves on boards that have Left/Right.
   static constexpr int LOCATION_COUNT = 3;
+  static constexpr int LONG_TAB = 3;
+  static constexpr int QUICK_TAB = 4;
+  static constexpr int TAB_COUNT = 5;
+  // 1,500 words is about six minutes. Zero is on neither length tab.
+  static constexpr uint32_t LONG_READ_WORDS = 1500;
   static constexpr readwise::Location LOCATIONS[LOCATION_COUNT] = {
       readwise::Location::Later, readwise::Location::Shortlist, readwise::Location::Feed};
   int locationIndex = 0;
@@ -154,6 +159,8 @@ class ReadwiseLibraryActivity final : public UiTabListActivity {
   // filter is applied, sized to the shelf, rather than a resident copy of
   // every matching record.
   std::vector<uint16_t> authorSlots;
+  // docs.bin record indexes for the active length tab, newest first.
+  std::vector<uint16_t> lengthSlots;
   bool wifiActivated = false;
   // Back is also what navigates *into* this screen (from Settings, or out of a
   // managed article), and the button is often still held when the activity is

@@ -798,3 +798,49 @@ TEST(ReadwiseSync, LibraryCountsMissingFile) {
   LibraryCounts counts;
   EXPECT_FALSE(f.engine.collectLibraryCounts(counts));
 }
+
+TEST(ReadwiseSync, LengthSlotsSplitLaterAndShortlistByWordCount) {
+  Fixture f;
+  std::vector<uint16_t> slots;
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, nullptr, slots));
+  EXPECT_TRUE(slots.empty());
+
+  auto withWords = [](const char* id, Location location, const char* when, uint32_t words, const char* author) {
+    Document doc = makeDoc(id, location, when, when);
+    doc.wordCount = words;
+    copyBounded(doc.author, AUTHOR_CAP, author, strlen(author));
+    return doc;
+  };
+  f.api.pages.push_back({{
+                             withWords("later-long", Location::Later, kT1, 2000, "Ada"),
+                             withWords("later-quick", Location::Later, kT3, 400, "Ada"),
+                             withWords("later-zero", Location::Later, kT2, 0, "Ada"),
+                             withWords("short-edge", Location::Shortlist, kT2, 1500, "Bea"),
+                             withWords("short-quick", Location::Shortlist, kT1, 1499, "Bea"),
+                             withWords("feed-long", Location::Feed, kT3, 5000, "Ada"),
+                         },
+                         "",
+                         ApiStatus::Ok});
+  ASSERT_TRUE(f.engine.sync().ok);
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, nullptr, slots));
+  std::vector<Document> docs;
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 2u);
+  EXPECT_STREQ(docs[0].id, "short-edge");
+  EXPECT_STREQ(docs[1].id, "later-long");
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, false, nullptr, slots));
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 2u);
+  EXPECT_STREQ(docs[0].id, "later-quick");
+  EXPECT_STREQ(docs[1].id, "short-quick");
+
+  ASSERT_TRUE(f.engine.collectLengthSlots(1500, true, "Ada", slots));
+  ASSERT_TRUE(f.engine.readRecords(slots.data(), static_cast<uint16_t>(slots.size()), docs));
+  ASSERT_EQ(docs.size(), 1u);
+  EXPECT_STREQ(docs[0].id, "later-long");
+
+  EXPECT_TRUE(f.engine.readRecords(nullptr, 0, docs));
+  EXPECT_TRUE(docs.empty());
+}
