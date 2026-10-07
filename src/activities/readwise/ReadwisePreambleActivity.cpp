@@ -188,6 +188,25 @@ bool ReadwisePreambleActivity::handleButtons() {
   return false;
 }
 
+void ReadwisePreambleActivity::navigateButtons() {
+  if (!loaded) {
+    return;
+  }
+  // Index 0 is the Open/Download button above the metadata. The list rows
+  // follow, so Up from the first field returns to that button.
+  const int count = static_cast<int>(rowCount) + 1;
+  buttonNavigator.onNextPress(
+      [this, count] { moveSelectionTo(ButtonNavigator::nextIndex(nav.selected, count)); });
+  buttonNavigator.onPreviousPress(
+      [this, count] { moveSelectionTo(ButtonNavigator::previousIndex(nav.selected, count)); });
+  buttonNavigator.onNextContinuous([this, count] {
+    moveSelectionTo(ButtonNavigator::nextPageIndex(nav.selected, count, nav.inputPageRows()));
+  });
+  buttonNavigator.onPreviousContinuous([this, count] {
+    moveSelectionTo(ButtonNavigator::previousPageIndex(nav.selected, count, nav.inputPageRows()));
+  });
+}
+
 const char* ReadwisePreambleActivity::headerTitle() const {
   if (loaded && doc.title[0] != '\0') {
     return doc.title;
@@ -272,7 +291,8 @@ void ReadwisePreambleActivity::buildScreen(UiScreen& screen) {
   }
 
   const char* openLabel = (doc.flags & readwise::FLAG_HAS_BODY) != 0 ? tr(STR_OPEN) : tr(STR_DOWNLOAD);
-  screen.button(openLabel, ACTION_OPEN);
+  // nav 0 is this button (see navigateButtons). The metadata list starts at 1.
+  screen.button(openLabel, ACTION_OPEN, 0, nav.selected == 0 ? fui::StateSelected : fui::StateNormal);
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   fui::ListProps props;
@@ -287,7 +307,7 @@ void ReadwisePreambleActivity::buildScreen(UiScreen& screen) {
   props.labelText = label;
   props.subtitleText = screen.theme().smallText;
   props.subtitleText.maxLines = 8;
-  syncListViewport(screen, props);
+  syncListViewport(screen, props, 1);
   screen.list(props);
 }
 

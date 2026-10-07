@@ -69,8 +69,13 @@ class EpubReaderActivity final : public ReaderActivity {
   void offerReadwiseEndMenu();
   void showReadwiseEndMenu();
   void onReadwiseEndMenu(int selected);
-  void startReadwiseEndComment();
+  // Fills the id/title/author buffers from docs.bin. Cached after the first hit.
+  bool ensureReadwiseIdentity();
+  void startReadwiseEndComment(bool returnToEndMenu = true);
   void returnToReadwiseShelf(ReadwiseUi::ShelfReturn::Action action);
+  // More-sheet shelf actions. Comment and a cancelled delete come back here.
+  void runReadwiseMoreAction(EpubReaderMenuActivity::MenuAction action);
+  void reopenMorePanel();
   bool presentEndOfBookOverlay() override;
 
   // Toolbar reader menu (SETTINGS.readerMenuStyle == READER_MENU_TOOLBAR): drawn

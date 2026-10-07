@@ -28,7 +28,12 @@ class EpubReaderMenuActivity final : public UiListActivity {
     SYNC,
     DELETE_CACHE,
     DICTIONARY,
-    HIGHLIGHT
+    HIGHLIGHT,
+    // Readwise shelf actions. Shown in the toolbar More sheet beside Highlight.
+    READWISE_ARCHIVE,
+    READWISE_DELETE,
+    READWISE_COMMENT,
+    READWISE_AUTHOR
   };
 
   struct MenuItem {

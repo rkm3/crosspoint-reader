@@ -1057,6 +1057,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       addBookmark();
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::READWISE_ARCHIVE:
+    case EpubReaderMenuActivity::MenuAction::READWISE_DELETE:
+    case EpubReaderMenuActivity::MenuAction::READWISE_COMMENT:
+    case EpubReaderMenuActivity::MenuAction::READWISE_AUTHOR:
+      // The toolbar More sheet runs these itself and does not reach here.
+      break;
   }
 }
 
@@ -1342,26 +1348,35 @@ void EpubReaderActivity::offerReadwiseEndMenu() {
   showReadwiseEndMenu();
 }
 
-void EpubReaderActivity::showReadwiseEndMenu() {
-  if (!readwiseArticle || readwiseEndPopup.isActive()) return;
-  const std::string id = ReadwiseUi::idFromBodyPath(bookPath);
-  if (id.empty()) return;
+bool EpubReaderActivity::ensureReadwiseIdentity() {
+  if (!readwiseArticle) return false;
+  if (readwiseEndId[0] != '\0') return true;
 
+  const std::string id = ReadwiseUi::idFromBodyPath(bookPath);
+  if (id.empty()) return false;
+
+  // Document is ~800 bytes; keep it off the stack.
   readwise::NullReadwiseApi api;
   readwise::SdReadwiseFileStore store;
   auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
   auto doc = makeUniqueNoThrow<readwise::Document>();
   if (!engine || !doc) {
-    LOG_ERR("ERS", "OOM: readwise end menu");
-    return;
+    LOG_ERR("ERS", "OOM: readwise document");
+    return false;
   }
   if (!engine->findDocument(id.c_str(), *doc)) {
-    LOG_ERR("ERS", "End menu: document missing");
-    return;
+    LOG_ERR("ERS", "Readwise document missing");
+    return false;
   }
   readwise::copyBounded(readwiseEndId, sizeof(readwiseEndId), doc->id, strlen(doc->id));
   readwise::copyBounded(readwiseEndTitle, sizeof(readwiseEndTitle), doc->title, strlen(doc->title));
   readwise::copyBounded(readwiseEndAuthor, sizeof(readwiseEndAuthor), doc->author, strlen(doc->author));
+  return true;
+}
+
+void EpubReaderActivity::showReadwiseEndMenu() {
+  if (!readwiseArticle || readwiseEndPopup.isActive()) return;
+  if (!ensureReadwiseIdentity()) return;
 
   const char* labels[4] = {};
   readwiseEndActionCount = ReadwiseUi::fillReadwiseEntryMenu(readwiseEndAuthor, labels, readwiseEndActions, 4);
@@ -1404,11 +1419,12 @@ void EpubReaderActivity::onReadwiseEndMenu(const int selected) {
   }
 }
 
-void EpubReaderActivity::startReadwiseEndComment() {
+void EpubReaderActivity::startReadwiseEndComment(const bool returnToEndMenu) {
   auto existing = makeUniqueNoThrow<char[]>(readwise::ReadwiseSyncEngine::NOTE_CAP);
   if (!existing) {
     LOG_ERR("ERS", "OOM: readwise note");
-    showReadwiseEndMenu();
+    if (returnToEndMenu) showReadwiseEndMenu();
+    else reopenMorePanel();
     return;
   }
   existing[0] = '\0';
@@ -1423,10 +1439,11 @@ void EpubReaderActivity::startReadwiseEndComment() {
                                                readwise::ReadwiseSyncEngine::NOTE_CAP - 1);
   if (!keyboard) {
     LOG_ERR("ERS", "OOM: readwise comment keyboard");
-    showReadwiseEndMenu();
+    if (returnToEndMenu) showReadwiseEndMenu();
+    else reopenMorePanel();
     return;
   }
-  startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
+  startActivityForResult(std::move(keyboard), [this, returnToEndMenu](const ActivityResult& result) {
     if (!result.isCancelled) {
       const auto* entered = std::get_if<KeyboardResult>(&result.data);
       if (entered != nullptr) {
@@ -1439,9 +1456,63 @@ void EpubReaderActivity::startReadwiseEndComment() {
         }
       }
     }
-    showReadwiseEndMenu();
+    if (returnToEndMenu) showReadwiseEndMenu();
+    else reopenMorePanel();
     requestUpdate();
   });
+}
+
+void EpubReaderActivity::reopenMorePanel() {
+  overlay = Overlay::More;
+  focusedTool = 2;
+  panelCursorShown = !mappedInput.hasTouch();
+  panelHoldJumped = false;
+  if (!toolbarUi) toolbarUi = std::make_unique<ReaderToolbarUi>(renderer);
+  toolbarUi->begin();
+  buildMoreActions();
+  if (panelIndex < 0 || panelIndex >= static_cast<int>(moreItems.size())) panelIndex = 0;
+  toolbarUi->nav().reset(panelIndex);
+  discardOverlayPage();
+  requestUpdate();
+}
+
+void EpubReaderActivity::runReadwiseMoreAction(const EpubReaderMenuActivity::MenuAction action) {
+  using MA = EpubReaderMenuActivity::MenuAction;
+  if (!ensureReadwiseIdentity()) {
+    requestUpdate();
+    return;
+  }
+  switch (action) {
+    case MA::READWISE_ARCHIVE:
+      returnToReadwiseShelf(ReadwiseUi::ShelfReturn::Action::Archive);
+      return;
+    case MA::READWISE_AUTHOR:
+      returnToReadwiseShelf(ReadwiseUi::ShelfReturn::Action::FilterAuthor);
+      return;
+    case MA::READWISE_DELETE: {
+      const std::string heading = std::string(tr(STR_DELETE)) + "? ";
+      auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, readwiseEndTitle);
+      if (!confirmation) {
+        LOG_ERR("ERS", "OOM: readwise delete confirmation");
+        reopenMorePanel();
+        return;
+      }
+      startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          reopenMorePanel();
+          return;
+        }
+        returnToReadwiseShelf(ReadwiseUi::ShelfReturn::Action::Delete);
+      });
+      return;
+    }
+    case MA::READWISE_COMMENT:
+      startReadwiseEndComment(false);
+      return;
+    default:
+      requestUpdate();
+      return;
+  }
 }
 
 void EpubReaderActivity::returnToReadwiseShelf(const ReadwiseUi::ShelfReturn::Action action) {
@@ -2761,6 +2832,7 @@ void EpubReaderActivity::applyReaderTextSettings() {
 
 // The More panel carries everything the classic list menu offers except the
 // two entries that have their own tool (chapters -> Contents, text -> Text).
+// On a Readwise article, the shelf actions sit beside Highlight.
 void EpubReaderActivity::buildMoreActions() {
   using MA = EpubReaderMenuActivity::MenuAction;
   EpubReaderMenuActivity::buildMenuItems(moreItems, !currentPageFootnotes.empty(), !cachedBookmarks.empty(),
@@ -2770,6 +2842,22 @@ void EpubReaderActivity::buildMoreActions() {
                                    return item.action == MA::SELECT_CHAPTER || item.action == MA::TEXT_SETTINGS;
                                  }),
                   moreItems.end());
+
+  if (!readwiseArticle || !ensureReadwiseIdentity()) return;
+
+  EpubReaderMenuActivity::MenuItem extra[4];
+  int extraCount = 0;
+  extra[extraCount++] = {MA::READWISE_ARCHIVE, StrId::STR_READWISE_ARCHIVE};
+  extra[extraCount++] = {MA::READWISE_DELETE, StrId::STR_DELETE};
+  extra[extraCount++] = {MA::READWISE_COMMENT, StrId::STR_READWISE_COMMENT};
+  if (readwiseEndAuthor[0] != '\0') {
+    extra[extraCount++] = {MA::READWISE_AUTHOR, StrId::STR_READWISE_MORE_AUTHOR};
+  }
+  moreItems.reserve(moreItems.size() + static_cast<size_t>(extraCount));
+  auto pos = std::find_if(moreItems.begin(), moreItems.end(),
+                          [](const EpubReaderMenuActivity::MenuItem& item) { return item.action == MA::HIGHLIGHT; });
+  if (pos != moreItems.end()) ++pos;
+  moreItems.insert(pos, extra, extra + extraCount);
 }
 
 std::string EpubReaderActivity::moreRowName(int row) const {
@@ -2872,6 +2960,11 @@ void EpubReaderActivity::activateMoreRow(int row) {
     showBookmarkMessage = true;
     bookmarkMessageTime = millis();
     requestUpdate();
+    return;
+  }
+  if (action == MA::READWISE_ARCHIVE || action == MA::READWISE_DELETE || action == MA::READWISE_COMMENT ||
+      action == MA::READWISE_AUTHOR) {
+    runReadwiseMoreAction(action);
     return;
   }
   onReaderMenuConfirm(action);

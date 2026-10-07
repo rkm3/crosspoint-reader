@@ -30,6 +30,7 @@ class ReadwisePreambleActivity final : public UiListActivity {
   void activateIndex(int) override {}
   bool handleCustomInput() override;
   bool handleButtons() override;
+  void navigateButtons() override;
   const char* headerTitle() const override;
   void drawFooter() override;
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
