@@ -767,8 +767,9 @@ void ReadwiseLibraryActivity::provideRow(void* ctx, const uint16_t index, fui::L
     return;
   }
   if (self->queuedTab()) {
+    // index 0 is the Sync row, already returned above, so this is never negative.
     const int docIndex = static_cast<int>(index) - 1;
-    if (docIndex < 0 || docIndex >= static_cast<int>(self->queued.size())) {
+    if (docIndex >= static_cast<int>(self->queued.size())) {
       return;
     }
     const readwise::ReadwiseSyncEngine::QueuedDocument& row = self->queued[static_cast<size_t>(docIndex)];
