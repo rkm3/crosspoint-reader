@@ -537,7 +537,7 @@ void HomeActivity::render(RenderLock&&) {
     // After the plugins/OPDS slot when that slot is present, before File Transfer.
     const int readwisePos = hasLibrarySlot() ? 3 : 2;
     menuItems.insert(menuItems.begin() + readwisePos, tr(STR_READWISE));
-    menuIcons.insert(menuIcons.begin() + readwisePos, Library);
+    menuIcons.insert(menuIcons.begin() + readwisePos, Readwise);
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
