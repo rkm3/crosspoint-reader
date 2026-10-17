@@ -68,13 +68,17 @@ class EpubReaderActivity final : public ReaderActivity {
   char readwiseEndAuthor[readwise::AUTHOR_CAP] = {};
   ReadwiseUi::ReadwiseEntryAction readwiseEndActions[4] = {};
   uint8_t readwiseEndActionCount = 0;
-  // Underlines for quotes already saved on this article. Built once per page
-  // paint; grayscale strips redraw these segments and do not re-read the file.
+  // Saved-quote marks on this article. Built once per page paint. The
+  // grayscale pass redraws the shade from these runs and does not re-read
+  // the quote file. Pending and rejected quotes are the dark style; a quote
+  // Readwise has accepted is the light style.
   struct HighlightSegment {
     int16_t x = 0;
-    int16_t y = 0;
+    int16_t top = 0;
     int16_t width = 0;
-    uint8_t posted = 0;
+    int16_t height = 0;
+    int16_t underlineY = 0;
+    uint8_t mark = 0;
   };
   static constexpr uint8_t HIGHLIGHT_SEGMENT_MAX = 48;
   HighlightSegment highlightSegments[HIGHLIGHT_SEGMENT_MAX] = {};
@@ -84,7 +88,8 @@ class EpubReaderActivity final : public ReaderActivity {
   unsigned long highlightMessageTime = 0UL;
   const char* highlightDocumentId();
   void ensureHighlightMarks(const Page& page, int fontId, int marginLeft, int marginTop);
-  void drawHighlightMarks() const;
+  void drawHighlightShades() const;
+  void drawHighlightUnderlines() const;
   void offerReadwiseEndMenu();
   void showReadwiseEndMenu();
   void onReadwiseEndMenu(int selected);

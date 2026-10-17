@@ -722,7 +722,7 @@ bodies/<id>/
     epub_<hash>/      the reader's own cache: book.bin, sections, extracted
                       images, .pxc pixel caches, cover/thumb bitmaps
 
-highlights/<id>.bin   quotes taken on this device, version 1
+highlights/<id>.bin   quotes taken on this device, version 2
 ```
 
 `highlights/<id>.bin` is the clip queue for one article. It sits outside
@@ -731,9 +731,13 @@ quote. Older builds stored the same file at `bodies/<id>/highlights.bin`; the
 next read copies it to the new path and leaves the old file in place if that
 copy fails. The header snapshots the title, author, and source URL at the
 first quote, and each record is a little-endian length, a flags byte, and the
-quote bytes (at most 280). `bit 0` is set once `POST /api/v2/highlights/` has
-accepted the quote. `bit 1` is set when the server rejects it (HTTP 4xx); that
-quote is not retried. A repeat of the same quote is not stored again.
+quote bytes. Version 2 stores at most 1024 quote bytes. Version 1 files (at
+most 280) are still read; the next quote appended to one rewrites the header
+version to 2 and leaves the existing records in place. A version 1 record
+longer than 280 is treated as truncated and ends the scan. `bit 0` is set once
+`POST /api/v2/highlights/` has accepted the quote. `bit 1` is set when the
+server rejects it (HTTP 4xx); that quote is not retried. A repeat of the same
+quote is not stored again.
 `highlights.idx` at the Readwise root lists the document ids that still have
 an unposted, non-rejected quote, because sync cannot list the directory. The
 quote file is kept after the index drops the id, so a posted or rejected quote

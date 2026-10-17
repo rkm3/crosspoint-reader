@@ -301,6 +301,11 @@ class GfxRenderer {
   void maskRoundedRectOutsideCorners(int x, int y, int width, int height, int radius, Color color = Color::White) const;
   void fillRect(int x, int y, int width, int height, bool state = true) const;
   void fillRectDither(int x, int y, int width, int height, Color color) const;
+  // Highlight shade. In BW mode and on absolute gray planes this is a dither
+  // (the caller draws text afterwards so glyphs stay black). On an overlay gray
+  // plane it sets the update bit only where the BW framebuffer is still white,
+  // so black text and underlines stay black.
+  void shadeHighlightRect(int x, int y, int width, int height, bool dark) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, Color color) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, bool roundTopLeft, bool roundTopRight,
                        bool roundBottomLeft, bool roundBottomRight, Color color) const;

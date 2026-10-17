@@ -1031,6 +1031,72 @@ void GfxRenderer::fillRectDither(const int x, const int y, const int width, cons
   }
 }
 
+void GfxRenderer::shadeHighlightRect(const int x, const int y, const int width, const int height,
+                                     const bool dark) const {
+  if (width <= 0 || height <= 0) return;
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
+
+  // Absolute planes store ink, not an overlay mask. A dither leaves the text
+  // readable once the caller redraws the glyphs on top. BW has no gray plane.
+  if (renderMode == BW || absoluteGrayPlanes) {
+    fillRectDither(x, y, width, height, dark ? Color::DarkGray : Color::LightGray);
+    return;
+  }
+
+  // Overlay: MSB marks light and dark gray, LSB marks dark gray only.
+  const bool paint = renderMode == GRAYSCALE_MSB || (dark && renderMode == GRAYSCALE_LSB);
+  if (!paint) return;
+
+  const int screenW = getScreenWidth();
+  const int screenH = getScreenHeight();
+  const int lx0 = std::max({0, x, clipLeft_});
+  const int ly0 = std::max({0, y, clipTop_});
+  const int lx1 = std::min({screenW, x + width, clipRight_});
+  const int ly1 = std::min({screenH, y + height, clipBottom_});
+  if (lx0 >= lx1 || ly0 >= ly1) return;
+
+  int paX, paY, pbX, pbY;
+  rotateCoordinates(orientation, lx0, ly0, &paX, &paY, panelWidth, panelHeight);
+  rotateCoordinates(orientation, lx1 - 1, ly1 - 1, &pbX, &pbY, panelWidth, panelHeight);
+  const int phyX0 = std::min(paX, pbX);
+  const int phyX1 = std::max(paX, pbX);
+  int phyY0 = std::min(paY, pbY);
+  int phyY1 = std::max(paY, pbY);
+
+  uint8_t* target = getWriteTarget();
+  const int originY = getWriteOriginY();
+  const int writeRows = getWriteRows();
+  phyY0 = std::max(phyY0, originY);
+  phyY1 = std::min(phyY1, originY + writeRows - 1);
+  if (phyY0 > phyY1 || target == nullptr || frameBuffer == nullptr) return;
+
+  // Tiled grayscale keeps the BW page in the framebuffer. The full-frame path
+  // has stashed it in bwBufferChunks before reusing the framebuffer.
+  const bool storedBw = !_stripActive && !bwBufferChunks.empty() && bwBufferChunks[0] != nullptr;
+  const int32_t panelStride = static_cast<int32_t>(panelWidthBytes);
+
+  for (int py = phyY0; py <= phyY1; ++py) {
+    uint8_t* row = target + static_cast<int32_t>(py - originY) * panelStride;
+    for (int px = phyX0; px <= phyX1; ++px) {
+      const uint32_t bwIndex = static_cast<uint32_t>(py) * panelWidthBytes + static_cast<uint32_t>(px >> 3);
+      if (bwIndex >= frameBufferSize) continue;
+      const uint8_t* bwByte = nullptr;
+      if (storedBw) {
+        const size_t chunk = bwIndex / BW_BUFFER_CHUNK_SIZE;
+        const size_t off = bwIndex % BW_BUFFER_CHUNK_SIZE;
+        if (chunk >= bwBufferChunks.size() || bwBufferChunks[chunk] == nullptr) continue;
+        bwByte = bwBufferChunks[chunk] + off;
+      } else {
+        bwByte = frameBuffer + bwIndex;
+      }
+      const uint8_t mask = static_cast<uint8_t>(0x80u >> (px & 7));
+      if ((*bwByte & mask) == 0) continue;  // black text or underline stays black
+      const int dstIndex = px >> 3;
+      row[dstIndex] = static_cast<uint8_t>(row[dstIndex] | mask);
+    }
+  }
+}
+
 template <Color C>
 void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const int height) const {
   if constexpr (C == Color::Clear) return;

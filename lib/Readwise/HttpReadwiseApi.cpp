@@ -208,9 +208,9 @@ ApiStatus HttpReadwiseApi::pushHighlight(const char* text, const char* title, co
     noteLocal("empty highlight");
     return ApiStatus::ServerError;
   }
-  // Escaping can double the quote, title, author, and URL. 2 KB covers that
-  // plus the JSON keys; the quote itself is capped at 280 bytes.
-  constexpr size_t kBodyCap = 2048;
+  // A control byte becomes \u00XX (6 bytes). The fixed JSON keys sit in the
+  // extra 256. The quote cap is 1024.
+  constexpr size_t kBodyCap = 256 + 6 * (HIGHLIGHT_TEXT_MAX + TITLE_CAP + AUTHOR_CAP + SOURCE_URL_CAP);
   auto body = makeUniqueNoThrow<char[]>(kBodyCap);
   if (!body) {
     LOG_ERR("RWAPI", "OOM: highlight body");

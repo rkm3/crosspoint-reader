@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1288,4 +1290,50 @@ TEST(ReadwiseSync, QueuedListShowsArchiveAndDeleteAndUndo) {
   }
   EXPECT_TRUE(back);
   EXPECT_FALSE(f.engine.undoQueued("short"));
+}
+
+std::vector<uint8_t> highlightFile(const uint8_t version, const std::string& quote, const uint8_t flags) {
+  std::vector<uint8_t> bytes(HIGHLIGHT_HEADER_BYTES, 0);
+  bytes[0] = version;
+  const char* title = "Old Title";
+  memcpy(bytes.data() + 1, title, strlen(title));
+  const size_t len = quote.size();
+  bytes.push_back(static_cast<uint8_t>(len & 0xFF));
+  bytes.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+  bytes.push_back(flags);
+  bytes.insert(bytes.end(), quote.begin(), quote.end());
+  return bytes;
+}
+
+TEST(ReadwiseSync, Version1HighlightFileStillReadsAndAcceptsALongerQuote) {
+  Fixture f;
+  constexpr const char* id = "01hzzzzzzzzzzzzzzzzzzzzz08";
+  const std::string path = std::string(kBase) + "/highlights/" + id + ".bin";
+  const std::string kept(HIGHLIGHT_TEXT_MAX_V1, 'q');
+  f.store.put(path, highlightFile(HIGHLIGHT_FILE_VERSION_V1, kept, HIGHLIGHT_FLAG_POSTED));
+
+  auto stored = std::make_unique<ReadwiseSyncEngine::StoredHighlight[]>(2);
+  ASSERT_EQ(f.engine.readHighlights(id, stored.get(), 2), 1);
+  EXPECT_EQ(std::string(stored[0].text), kept);
+  EXPECT_EQ(stored[0].flags, HIGHLIGHT_FLAG_POSTED);
+
+  // A record longer than the version 1 cap is truncated data, not a quote.
+  std::vector<uint8_t> broken = highlightFile(HIGHLIGHT_FILE_VERSION_V1, kept, 0);
+  const std::string extra(HIGHLIGHT_TEXT_MAX_V1 + 1, 'z');
+  broken.push_back(static_cast<uint8_t>(extra.size() & 0xFF));
+  broken.push_back(static_cast<uint8_t>((extra.size() >> 8) & 0xFF));
+  broken.push_back(0);
+  broken.insert(broken.end(), extra.begin(), extra.end());
+  f.store.put(path, broken);
+  ASSERT_EQ(f.engine.readHighlights(id, stored.get(), 2), 1);
+  EXPECT_EQ(std::string(stored[0].text), kept);
+
+  f.store.put(path, highlightFile(HIGHLIGHT_FILE_VERSION_V1, "kept from the old cap", 0));
+  const std::string longer(400, 'a');
+  ASSERT_TRUE(f.engine.appendHighlight(id, longer.c_str()));
+  ASSERT_EQ(f.engine.readHighlights(id, stored.get(), 2), 2);
+  EXPECT_STREQ(stored[0].text, "kept from the old cap");
+  EXPECT_EQ(stored[0].flags, 0);
+  EXPECT_EQ(std::string(stored[1].text), longer);
+  EXPECT_EQ(f.store.files().at(path)[0], HIGHLIGHT_FILE_VERSION);
 }

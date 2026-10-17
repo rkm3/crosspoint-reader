@@ -50,15 +50,29 @@ inline constexpr const char* HIGHLIGHT_INLINE_TAG = "delink";
 inline constexpr const char* HIGHLIGHT_INLINE_TAG = "crosspoint";
 #endif
 
-// 280 bytes of quote, plus the NUL the in-memory buffer keeps.
-inline constexpr size_t HIGHLIGHT_TEXT_MAX = 280;
+// Quote bytes, plus the NUL the in-memory buffer keeps. Version 1 files stored
+// at most 280. Version 2 stores the same records with this larger cap.
+// Readwise's highlight API accepts 1024.
+inline constexpr size_t HIGHLIGHT_TEXT_MAX_V1 = 280;
+inline constexpr size_t HIGHLIGHT_TEXT_MAX = 1024;
 inline constexpr int HIGHLIGHT_MAX_PER_DOC = 32;
 inline constexpr int HIGHLIGHT_INDEX_MAX = 160;
 
-inline constexpr uint8_t HIGHLIGHT_FILE_VERSION = 1;
+inline constexpr uint8_t HIGHLIGHT_FILE_VERSION_V1 = 1;
+inline constexpr uint8_t HIGHLIGHT_FILE_VERSION = 2;
 inline constexpr uint8_t HIGHLIGHT_INDEX_VERSION = 1;
+
+inline bool isHighlightFileVersion(const uint8_t version) {
+  return version == HIGHLIGHT_FILE_VERSION_V1 || version == HIGHLIGHT_FILE_VERSION;
+}
+
+// Longest quote a file of `version` may contain. A version 1 record longer
+// than the old cap is truncated data, not a quote this build wrote.
+inline size_t highlightTextLimit(const uint8_t version) {
+  return version == HIGHLIGHT_FILE_VERSION_V1 ? HIGHLIGHT_TEXT_MAX_V1 : HIGHLIGHT_TEXT_MAX;
+}
 // bit 0: the server accepted the quote. bit 1: the server rejected it (4xx).
-// A rejected quote is not retried. The layout is unchanged, so the version stays 1.
+// A rejected quote is not retried. The flag byte is the same in version 1 and 2.
 inline constexpr uint8_t HIGHLIGHT_FLAG_POSTED = 1;
 inline constexpr uint8_t HIGHLIGHT_FLAG_FAILED = 2;
 
@@ -82,9 +96,70 @@ struct HighlightWordView {
 
 enum class HighlightMark : uint8_t { None = 0, Pending = 1, Posted = 2 };
 
+// Pending and rejected quotes are the dark style (the reader rarely revisits
+// an article after sync). Posted quotes are the light style.
+//   dark:  3px solid underline, dark gray shade
+//   light: 1px solid underline, light gray shade
+// The shade is painted on the grayscale pass. A path without a gray plane
+// dithers the same two weights instead.
+inline constexpr int HIGHLIGHT_DARK_UNDERLINE_PX = 3;
+inline constexpr int HIGHLIGHT_LIGHT_UNDERLINE_PX = 1;
+
+// In highlight mode, before a selection starts, each side-button press moves
+// the visible lines by this many. Presses accumulate, up to one page.
+inline constexpr int HIGHLIGHT_NUDGE_LINES = 3;
+
 // A cross-page fragment shorter than this is not marked. A full quote is
 // marked at any length.
 inline constexpr uint16_t HIGHLIGHT_PARTIAL_MIN_WORDS = 3;
+
+// One selectable word plus where it sits, for joining marks into runs.
+// `line` changes when the word is on a different text line. `mark` is a
+// HighlightMark value.
+struct HighlightWordMark {
+  int16_t x = 0;
+  int16_t top = 0;
+  int16_t width = 0;
+  int16_t height = 0;
+  int16_t underlineY = 0;
+  uint16_t line = 0;
+  uint8_t mark = 0;
+};
+
+// A continuous mark. Adjacent words on the same line with the same mark become
+// one run whose box spans the gaps between them.
+struct HighlightRun {
+  int16_t x = 0;
+  int16_t top = 0;
+  int16_t width = 0;
+  int16_t height = 0;
+  int16_t underlineY = 0;
+  uint8_t mark = 0;
+};
+
+// Merges reading-order words into runs. A None mark or a line change ends the
+// current run. Returns how many runs were written, stopping at `outCap`.
+uint8_t mergeHighlightRuns(const HighlightWordMark* words, uint16_t wordCount, HighlightRun* out, uint8_t outCap);
+
+// Clamps a line offset so the window stays inside [0, lineCount) and moves at
+// most `maxShift` lines from the anchor page. `anchorLine` is the first line
+// of the page the reader saved. Positive shift reveals later lines.
+int clampHighlightShift(int shift, uint16_t anchorLine, uint16_t lineCount, uint16_t viewportLines, uint16_t maxShift);
+
+// Half-open line range [first, last) covered by `shift`. The window is
+// `viewportLines` long and is clamped the same way as clampHighlightShift
+// with maxShift = viewportLines.
+void highlightWindow(uint16_t anchorLine, uint16_t lineCount, uint16_t viewportLines, int shift, uint16_t& firstLine,
+                     uint16_t& lastLine);
+
+// Indexes of `wordLines` that fall inside the window. `wordLines[i]` is the
+// source line of word i. Returns how many indexes were written.
+uint16_t nudgedViewIndices(const uint16_t* wordLines, uint16_t wordCount, uint16_t anchorLine, uint16_t viewportLines,
+                           int shift, uint16_t* out, uint16_t outCap);
+
+// Joins `words` with single spaces and trims to the quote cap on a word
+// boundary. `cap` includes the NUL. Returns false when the result is empty.
+bool quoteFromHighlightWords(const char* const* words, uint16_t count, char* out, size_t cap);
 
 // Marks `words` where a stored quote occurs. Quotes are space-separated
 // selectable tokens, the same sequence HighlightSelect stores. Every
@@ -93,9 +168,16 @@ inline constexpr uint16_t HIGHLIGHT_PARTIAL_MIN_WORDS = 3;
 // the page's leading words, and that fragment is at least
 // HIGHLIGHT_PARTIAL_MIN_WORDS. Posted wins over pending on the same word.
 // `marks` is `wordCount` entries and is cleared first. `quoteFlags` bit 0
-// means the server accepted that quote.
+// means the server accepted that quote. A rejected quote (bit 1, not bit 0)
+// is pending: the page draws it with the dark style.
 void markHighlightWords(const HighlightWordView* words, uint16_t wordCount, const char* const* quotes,
                         const uint8_t* quoteFlags, uint16_t quoteCount, uint8_t* marks);
+
+// Same matching as one pass of markHighlightWords, without clearing `marks`.
+// Page rendering calls this once per stored quote so it does not hold every
+// quote at once.
+void applyHighlightQuote(const HighlightWordView* words, uint16_t wordCount, const char* quote, uint8_t flags,
+                         uint8_t* marks);
 
 // {"highlights":[{text, title, author, source_url, source_type, category, note}]}.
 // `note` is the inline tag (".x4pro") so Readwise attaches #x4pro (or the
