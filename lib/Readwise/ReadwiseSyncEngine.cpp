@@ -1089,6 +1089,24 @@ std::string ReadwiseSyncEngine::highlightPath(const char* id) const {
 
 std::string ReadwiseSyncEngine::legacyHighlightPath(const char* id) const { return articleDir(id) + "/highlights.bin"; }
 
+namespace {
+
+bool storedHighlightVersion(ReadwiseFileStore& store, const std::string& path, const long fileSize, uint8_t& version) {
+  if (fileSize < 0 || static_cast<size_t>(fileSize) < HIGHLIGHT_HEADER_BYTES) {
+    return false;
+  }
+  if (store.readRange(path, 0, &version, 1) != 1 || !isHighlightFileVersion(version)) {
+    return false;
+  }
+  return true;
+}
+
+bool highlightRecordFits(const uint8_t version, const size_t len, const size_t offset, const size_t fileSize) {
+  return len > 0 && len <= highlightTextLimit(version) && offset + 3 + len <= fileSize;
+}
+
+}  // namespace
+
 bool ReadwiseSyncEngine::relocateHighlight(const char* id) {
   if (!isValidDocumentId(id)) {
     return false;
@@ -1099,7 +1117,7 @@ bool ReadwiseSyncEngine::relocateHighlight(const char* id) {
     return true;
   }
   // A crash between the copy and the delete leaves both. The copy is complete
-  // (writeAll is atomic), so the leftover is only removed.
+  // (writeAll replaces the destination in one step), so the leftover is only removed.
   if (store_.exists(dest)) {
     store_.remove(legacy);
     return !store_.exists(legacy);
@@ -1109,6 +1127,10 @@ bool ReadwiseSyncEngine::relocateHighlight(const char* id) {
     LOG_ERR("RWSYNC", "Highlight file for %s is missing or too large to move", id);
     return false;
   }
+  // writeAll, not beginWrite: this runs from inside the docs.bin rewrite, and
+  // the store allows only one open write. The buffer is the file's real size.
+  // A full file is about 33KB (32 quotes at the 1024-byte cap); a short one is
+  // a few hundred bytes. OOM leaves the article directory in place.
   auto bytes = makeUniqueNoThrow<uint8_t[]>(static_cast<size_t>(fileSize));
   if (!bytes) {
     LOG_ERR("RWSYNC", "OOM: moving highlight for %s (%ld bytes)", id, fileSize);
@@ -1245,11 +1267,11 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
     return false;
   }
   uint8_t version = 0;
-  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+  if (!storedHighlightVersion(store_, path, fileSize, version)) {
     return false;
   }
   // The scan reads each stored quote into highlightText_, so the fitted text
-  // has to live somewhere else. 281 bytes is over the stack budget.
+  // has to live somewhere else. The quote cap is over the stack budget.
   auto fitted = makeUniqueNoThrow<char[]>(textLen + 1);
   if (!fitted) {
     return false;
@@ -1264,7 +1286,7 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
       return false;
     }
     const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
-    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+    if (!highlightRecordFits(version, len, offset, static_cast<size_t>(fileSize))) {
       return false;
     }
     if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(highlightText_), len) != static_cast<int>(len)) {
@@ -1283,7 +1305,15 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   if (!store_.beginWrite(path)) {
     return false;
   }
-  size_t copied = 0;
+  // A version 1 file is rewritten as version 2. The records are unchanged, so
+  // a pending quote from the 280-byte cap is still there, and a longer quote
+  // can be appended.
+  const uint8_t outVersion = HIGHLIGHT_FILE_VERSION;
+  if (!store_.writeChunk(&outVersion, 1)) {
+    store_.abortWrite();
+    return false;
+  }
+  size_t copied = 1;
   uint8_t chunk[128];
   while (copied < static_cast<size_t>(fileSize)) {
     const size_t want =
@@ -1304,40 +1334,71 @@ bool ReadwiseSyncEngine::appendHighlight(const char* id, const char* text) {
   return indexHighlight(id);
 }
 
-int ReadwiseSyncEngine::readHighlights(const char* id, StoredHighlight* out, const int cap) {
-  if (out == nullptr || cap <= 0 || !isValidDocumentId(id)) {
+int ReadwiseSyncEngine::forEachHighlight(const char* id, const HighlightVisitor visit, void* ctx) {
+  if (!isValidDocumentId(id)) {
     return 0;
   }
   relocateHighlight(id);
   const std::string path = highlightPath(id);
   const long fileSize = store_.size(path);
-  if (fileSize < 0 || static_cast<size_t>(fileSize) < HIGHLIGHT_HEADER_BYTES) {
-    return 0;
-  }
   uint8_t version = 0;
-  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+  if (!storedHighlightVersion(store_, path, fileSize, version)) {
     return 0;
   }
   size_t offset = HIGHLIGHT_HEADER_BYTES;
   int count = 0;
-  while (offset + 3 <= static_cast<size_t>(fileSize) && count < cap) {
+  while (offset + 3 <= static_cast<size_t>(fileSize)) {
     uint8_t prefix[3] = {};
     if (store_.readRange(path, offset, prefix, sizeof(prefix)) != static_cast<int>(sizeof(prefix))) {
       break;
     }
     const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
-    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+    if (!highlightRecordFits(version, len, offset, static_cast<size_t>(fileSize))) {
       break;
     }
-    if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(out[count].text), len) != static_cast<int>(len)) {
+    if (store_.readRange(path, offset + 3, reinterpret_cast<uint8_t*>(highlightText_), len) != static_cast<int>(len)) {
       break;
     }
-    out[count].text[len] = '\0';
-    out[count].flags = prefix[2];
+    highlightText_[len] = '\0';
+    if (visit != nullptr && !visit(highlightText_, prefix[2], ctx)) {
+      break;
+    }
     ++count;
     offset += 3 + len;
   }
   return count;
+}
+
+namespace {
+
+struct CollectedHighlights {
+  ReadwiseSyncEngine::StoredHighlight* out = nullptr;
+  int cap = 0;
+  int count = 0;
+};
+
+bool collectHighlight(const char* text, const uint8_t flags, void* ctx) {
+  auto* collected = static_cast<CollectedHighlights*>(ctx);
+  if (collected->count >= collected->cap) {
+    return false;
+  }
+  copyBounded(collected->out[collected->count].text, HIGHLIGHT_TEXT_MAX + 1, text, text != nullptr ? strlen(text) : 0);
+  collected->out[collected->count].flags = flags;
+  ++collected->count;
+  return true;
+}
+
+}  // namespace
+
+int ReadwiseSyncEngine::readHighlights(const char* id, StoredHighlight* out, const int cap) {
+  if (out == nullptr || cap <= 0) {
+    return 0;
+  }
+  CollectedHighlights collected;
+  collected.out = out;
+  collected.cap = cap;
+  forEachHighlight(id, collectHighlight, &collected);
+  return collected.count;
 }
 
 ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPending, char* step, size_t stepCap,
@@ -1354,7 +1415,7 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
     return ApiStatus::Ok;
   }
   uint8_t version = 0;
-  if (store_.readRange(path, 0, &version, 1) != 1 || version != HIGHLIGHT_FILE_VERSION) {
+  if (!storedHighlightVersion(store_, path, fileSize, version)) {
     stillPending = true;
     return ApiStatus::Ok;
   }
@@ -1377,7 +1438,7 @@ ApiStatus ReadwiseSyncEngine::pushHighlightFile(const char* id, bool& stillPendi
       return ApiStatus::Ok;
     }
     const size_t len = static_cast<size_t>(prefix[0] | (prefix[1] << 8));
-    if (len == 0 || len > HIGHLIGHT_TEXT_MAX || offset + 3 + len > static_cast<size_t>(fileSize)) {
+    if (!highlightRecordFits(version, len, offset, static_cast<size_t>(fileSize))) {
       stillPending = true;
       return ApiStatus::Ok;
     }

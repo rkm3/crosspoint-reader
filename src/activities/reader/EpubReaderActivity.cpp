@@ -386,24 +386,23 @@ void EpubReaderActivity::openHighlightSelect() {
   if (!ReadwiseUi::isBodyPath(bookPath) || !section) return;
   const std::string id = ReadwiseUi::idFromBodyPath(bookPath);
   if (id.empty()) return;
-  auto page = section->loadPage(section->currentPage);
-  if (!page) return;
-
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
                                    &orientedMarginLeft);
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
 
-  startActivityForResult(std::make_unique<HighlightSelectActivity>(renderer, mappedInput, std::move(page),
-                                                                   orientedMarginLeft, orientedMarginTop, id.c_str()),
-                         [this](const ActivityResult& result) {
-                           if (!result.isCancelled) {
-                             showHighlightMessage = true;
-                             highlightMessageTime = millis();
-                           }
-                           requestUpdate();
-                         });
+  // The activity loads neighbor pages itself and must not move currentPage.
+  startActivityForResult(
+      std::make_unique<HighlightSelectActivity>(renderer, mappedInput, section.get(), section->currentPage,
+                                                orientedMarginLeft, orientedMarginTop, id.c_str()),
+      [this](const ActivityResult& result) {
+        if (!result.isCancelled) {
+          showHighlightMessage = true;
+          highlightMessageTime = millis();
+        }
+        requestUpdate();
+      });
 }
 
 void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
@@ -2005,34 +2004,12 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
     highlightSegmentCount = 0;
     return;
   }
-  // Rebuilt once per page paint. drawHighlightMarks() reuses these segments
-  // for every grayscale strip, so the strips do not read the quote file.
+  // Rebuilt once per page paint. The shade and underline passes reuse these
+  // runs, so a grayscale strip does not read the quote file again.
   highlightSegmentCount = 0;
 
   const char* id = highlightDocumentId();
   if (!readwise::isValidDocumentId(id)) {
-    return;
-  }
-
-  // Quotes plus per-word geometry are several kilobytes. The render task stack
-  // cannot hold them, and they are released before the grayscale planes allocate.
-  auto stored = makeUniqueNoThrow<readwise::ReadwiseSyncEngine::StoredHighlight[]>(readwise::HIGHLIGHT_MAX_PER_DOC);
-  if (!stored) {
-    LOG_ERR("ERS", "OOM: highlight quotes");
-    return;
-  }
-  int quoteCount = 0;
-  {
-    readwise::NullReadwiseApi api;
-    readwise::SdReadwiseFileStore store;
-    auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
-    if (!engine) {
-      LOG_ERR("ERS", "OOM: highlight reader");
-      return;
-    }
-    quoteCount = engine->readHighlights(id, stored.get(), readwise::HIGHLIGHT_MAX_PER_DOC);
-  }
-  if (quoteCount <= 0) {
     return;
   }
 
@@ -2071,19 +2048,15 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
 
   auto views = makeUniqueNoThrow<readwise::HighlightWordView[]>(wordCount);
   auto marks = makeUniqueNoThrow<uint8_t[]>(wordCount);
-  struct Geom {
-    int16_t x;
-    int16_t y;
-    int16_t width;
-  };
-  auto geoms = makeUniqueNoThrow<Geom[]>(wordCount);
-  if (!views || !marks || !geoms) {
+  auto spans = makeUniqueNoThrow<readwise::HighlightWordMark[]>(wordCount);
+  if (!views || !marks || !spans) {
     LOG_ERR("ERS", "OOM: highlight marks (%u words)", static_cast<unsigned>(wordCount));
     return;
   }
 
   const int ascender = renderer.getFontAscenderSize(fontId);
   uint16_t filled = 0;
+  uint16_t lineId = 0;
   for (const auto& element : page.elements) {
     if (filled >= wordCount || element->getTag() != TAG_PageLine) {
       continue;
@@ -2095,6 +2068,7 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
     }
     const int8_t tracking = block->getBlockStyle().characterSpacing;
     const int rubyShift = block->getRubyShift(ascender);
+    const uint16_t line = lineId++;
     for (uint16_t i = 0; i < block->wordCount() && filled < wordCount; ++i) {
       const char* text = block->wordText(i);
       if (!isSelectableToken(text)) {
@@ -2110,79 +2084,93 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
       const int advance = renderer.getTextAdvanceX(fontId, text, style, tracking);
       views[filled].text = text;
       views[filled].length = block->wordTextLen(i);
-      geoms[filled].x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
-      geoms[filled].y = static_cast<int16_t>(wordY + ascender + 2);
-      geoms[filled].width = static_cast<int16_t>(advance > 0 ? advance : 0);
+      spans[filled].x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
+      spans[filled].top = static_cast<int16_t>(wordY);
+      spans[filled].width = static_cast<int16_t>(advance > 0 ? advance : 0);
+      spans[filled].underlineY = static_cast<int16_t>(wordY + ascender + 2);
+      spans[filled].line = line;
       ++filled;
     }
   }
 
-  const char* quoteText[readwise::HIGHLIGHT_MAX_PER_DOC];
-  uint8_t quoteFlags[readwise::HIGHLIGHT_MAX_PER_DOC];
-  for (int q = 0; q < quoteCount; ++q) {
-    quoteText[q] = stored[q].text;
-    quoteFlags[q] = stored[q].flags;
-  }
-  readwise::markHighlightWords(views.get(), filled, quoteText, quoteFlags, static_cast<uint16_t>(quoteCount),
-                               marks.get());
-
-  constexpr int kJoinGap = 12;
-  bool open = false;
-  int16_t segX = 0;
-  int16_t segY = 0;
-  int16_t segW = 0;
-  uint8_t segPosted = 0;
-  const auto flush = [&]() {
-    if (!open || segW <= 0 || highlightSegmentCount >= HIGHLIGHT_SEGMENT_MAX) {
-      open = false;
+  memset(marks.get(), 0, filled);
+  struct ApplyCtx {
+    const readwise::HighlightWordView* views;
+    uint8_t* marks;
+    uint16_t filled;
+  } applyCtx{views.get(), marks.get(), filled};
+  const auto applyQuote = [](const char* text, const uint8_t flags, void* ctx) -> bool {
+    const auto* apply = static_cast<const ApplyCtx*>(ctx);
+    readwise::applyHighlightQuote(apply->views, apply->filled, text, flags, apply->marks);
+    return true;
+  };
+  {
+    // One quote buffer lives on the engine. Streaming avoids a 32 KB copy of
+    // every quote on the render task, which the C3 heap does not have to spare
+    // next to the grayscale planes.
+    readwise::NullReadwiseApi api;
+    readwise::SdReadwiseFileStore store;
+    auto engine = makeUniqueNoThrow<readwise::ReadwiseSyncEngine>(api, store, ReadwiseCredentialStore::getDataDir());
+    if (!engine) {
+      LOG_ERR("ERS", "OOM: highlight reader");
       return;
     }
-    auto& seg = highlightSegments[highlightSegmentCount++];
-    seg.x = segX;
-    seg.y = segY;
-    seg.width = segW;
-    seg.posted = segPosted;
-    open = false;
-  };
-  for (uint16_t i = 0; i < filled; ++i) {
-    const uint8_t mark = marks[i];
-    if (mark == static_cast<uint8_t>(readwise::HighlightMark::None) || geoms[i].width <= 0) {
-      continue;
+    if (engine->forEachHighlight(id, applyQuote, &applyCtx) <= 0) {
+      return;
     }
-    const uint8_t posted = mark == static_cast<uint8_t>(readwise::HighlightMark::Posted) ? 1 : 0;
-    const int start = geoms[i].x;
-    const int end = start + geoms[i].width;
-    if (open && posted == segPosted && geoms[i].y == segY && start <= segX + segW + kJoinGap) {
-      if (end > segX + segW) {
-        segW = static_cast<int16_t>(end - segX);
-      }
-      continue;
-    }
-    flush();
-    segX = geoms[i].x;
-    segY = geoms[i].y;
-    segW = geoms[i].width;
-    segPosted = posted;
-    open = true;
   }
-  flush();
+
+  for (uint16_t i = 0; i < filled; ++i) {
+    spans[i].mark = marks[i];
+    const int thickness = marks[i] == static_cast<uint8_t>(readwise::HighlightMark::Posted)
+                              ? readwise::HIGHLIGHT_LIGHT_UNDERLINE_PX
+                              : readwise::HIGHLIGHT_DARK_UNDERLINE_PX;
+    const int bottom = spans[i].underlineY + thickness;
+    spans[i].height = static_cast<int16_t>(bottom > spans[i].top ? bottom - spans[i].top : 0);
+  }
+
+  auto runs = makeUniqueNoThrow<readwise::HighlightRun[]>(HIGHLIGHT_SEGMENT_MAX);
+  if (!runs) {
+    LOG_ERR("ERS", "OOM: highlight runs");
+    return;
+  }
+  highlightSegmentCount = readwise::mergeHighlightRuns(spans.get(), filled, runs.get(), HIGHLIGHT_SEGMENT_MAX);
+  for (uint8_t i = 0; i < highlightSegmentCount; ++i) {
+    highlightSegments[i].x = runs[i].x;
+    highlightSegments[i].top = runs[i].top;
+    highlightSegments[i].width = runs[i].width;
+    highlightSegments[i].height = runs[i].height;
+    highlightSegments[i].underlineY = runs[i].underlineY;
+    highlightSegments[i].mark = runs[i].mark;
+  }
 }
 
-void EpubReaderActivity::drawHighlightMarks() const {
+void EpubReaderActivity::drawHighlightShades() const {
   for (uint8_t i = 0; i < highlightSegmentCount; ++i) {
     const HighlightSegment& seg = highlightSegments[i];
-    if (seg.width <= 0) {
+    if (seg.width <= 0 || seg.height <= 0 || seg.mark == static_cast<uint8_t>(readwise::HighlightMark::None)) {
       continue;
     }
-    const int x2 = seg.x + seg.width - 1;
-    if (seg.posted != 0) {
-      renderer.drawLine(seg.x, seg.y, x2, seg.y, 2, true);
+    const bool dark = seg.mark != static_cast<uint8_t>(readwise::HighlightMark::Posted);
+    renderer.shadeHighlightRect(seg.x, seg.top, seg.width, seg.height, dark);
+  }
+}
+
+void EpubReaderActivity::drawHighlightUnderlines() const {
+  const bool bw = renderer.getRenderMode() == GfxRenderer::BW;
+  const bool absolute = renderer.grayPlanesAreAbsolute();
+  if (!bw && !absolute) {
+    return;
+  }
+  for (uint8_t i = 0; i < highlightSegmentCount; ++i) {
+    const HighlightSegment& seg = highlightSegments[i];
+    if (seg.width <= 0 || seg.mark == static_cast<uint8_t>(readwise::HighlightMark::None)) {
       continue;
     }
-    for (int x = seg.x; x <= x2; x += 4) {
-      const int dashEnd = x + 1 <= x2 ? x + 1 : x2;
-      renderer.drawLine(x, seg.y, dashEnd, seg.y, 2, true);
-    }
+    const bool dark = seg.mark != static_cast<uint8_t>(readwise::HighlightMark::Posted);
+    const int thickness = dark ? readwise::HIGHLIGHT_DARK_UNDERLINE_PX : readwise::HIGHLIGHT_LIGHT_UNDERLINE_PX;
+    const int x2 = static_cast<int>(seg.x) + seg.width - 1;
+    renderer.drawLine(seg.x, seg.underlineY, x2, seg.underlineY, thickness, true);
   }
 }
 
@@ -2228,13 +2216,23 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       tiledGrayscale && !pageHasImages && grayscale.base == HalDisplay::GrayscaleBase::Combined;
   const bool overlapRefresh = tiledGrayscale && grayscale.asyncBase && !pageHasImages;
   auto renderGrayscalePass = [&]() {
+    // Absolute planes store ink. Dither the shade first, then text and the
+    // underline cover it. Overlay planes are a mask: text (and its AA fringe)
+    // is painted first, then the shade sets bits only on white BW pixels.
+    if (renderer.grayPlanesAreAbsolute()) {
+      drawHighlightShades();
+    }
     if (absoluteImageGrayscale || needsTextGrayscale) {
       page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
     } else {
       page->renderImages(renderer, fontId, orientedMarginLeft, orientedMarginTop);
     }
     if (absoluteImageGrayscale) renderStatusBar();
-    drawHighlightMarks();
+    if (renderer.grayPlanesAreAbsolute()) {
+      drawHighlightUnderlines();
+    } else {
+      drawHighlightShades();
+    }
   };
 
   if (pageHasImagesNeedingDecode) {
@@ -2244,10 +2242,15 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     renderer.clearScreen();
   }
 
+  ensureHighlightMarks(*page, fontId, orientedMarginLeft, orientedMarginTop);
+  // Dither only when no gray plane follows. A dither left in the BW buffer
+  // ghosts through a fast refresh; the gray waveform replaces its whole plane.
+  if (!needsAnyGrayscale) {
+    drawHighlightShades();
+  }
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
   renderStatusBar();
-  ensureHighlightMarks(*page, fontId, orientedMarginLeft, orientedMarginTop);
-  drawHighlightMarks();
+  drawHighlightUnderlines();
   const auto tBwRender = millis();
 
   if (absoluteImageGrayscale) {

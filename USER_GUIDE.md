@@ -630,6 +630,19 @@ Words on the current page can be looked up in an offline StarDict dictionary sto
 
 See [docs/dictionary.md](docs/dictionary.md) for supported formats, setup, and where to find dictionaries.
 
+### Highlights (Readwise articles)
+
+On an article saved from Readwise, **Highlight** in the Reader Menu selects a passage and queues it for the next sync. Touch: tap the first word, drag to the last, and tap the selection again to save. Buttons: **Left/Right** move the end of the selection and **Confirm** saves it. **Back** cancels. A saved quote can be up to 1024 bytes. Quotes already stored by an older build (280 bytes) are kept.
+
+Before a selection starts, **Side Up** and **Side Down** shift the text by three lines, pulling lines from the previous or next page of the same chapter. Further presses keep shifting, up to one page. The book's saved page does not move. Saving or cancelling returns to that page, and the saved quote includes the words from both sides of the page break.
+
+Saved quotes are drawn on the page:
+
+* **Not yet synced, or rejected by Readwise:** dark gray shade and a 3-pixel solid underline.
+* **Accepted by Readwise:** light gray shade and a 1-pixel solid underline.
+
+Words on the same line are one continuous mark, including the space between them. A quote that started on the previous page or continues onto the next is marked on the part that is visible.
+
 ### System Navigation
 
 * **Return to Home:** Press the **Back** button to close the book and return to the **[Home](#31-home-screen)** screen.

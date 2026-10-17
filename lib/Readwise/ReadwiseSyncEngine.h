@@ -165,11 +165,20 @@ class ReadwiseSyncEngine {
 
   // Quotes stored for this document, including ones already posted. `out`
   // receives at most `cap` records. Returns the count, or 0 when there are none.
+  // Each record is HIGHLIGHT_TEXT_MAX+1 bytes. Callers allocate `out` on the
+  // heap; 32 records are about 32 KB and do not belong on the stack.
   struct StoredHighlight {
     char text[HIGHLIGHT_TEXT_MAX + 1] = {};
     uint8_t flags = 0;
   };
   int readHighlights(const char* id, StoredHighlight* out, int cap);
+
+  // One quote at a time. `visit` returns false to stop. Version 1 files (the
+  // 280-byte cap) and version 2 files are both read. Returns how many quotes
+  // were handed to `visit`. A truncated record ends the scan; earlier quotes
+  // are kept.
+  using HighlightVisitor = bool (*)(const char* text, uint8_t flags, void* ctx);
+  int forEachHighlight(const char* id, HighlightVisitor visit, void* ctx);
 
   // Location-index offsets whose author matches, in shelf order. One document
   // is decoded at a time. `author` is the stored AUTHOR_CAP string.
@@ -393,7 +402,7 @@ class ReadwiseSyncEngine {
   Document scratchDoc_;
   uint8_t recordBuffer_[MAX_ENCODED_RECORD];
   // One quote while a highlights.bin record is read. The engine is heap-allocated;
-  // 281 bytes does not belong on the stack.
+  // the quote cap does not belong on the stack.
   char highlightText_[HIGHLIGHT_TEXT_MAX + 1] = {};
   // Set for the duration of forgetDocument's rewrite. mergeIntoDocs skips it
   // and drops its body instead of carrying it forward.
