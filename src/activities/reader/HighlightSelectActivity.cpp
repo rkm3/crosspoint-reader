@@ -228,7 +228,7 @@ bool HighlightSelectActivity::rebuildWindow() {
       if (element->getTag() != TAG_PageLine) {
         continue;
       }
-      const auto* line = static_cast<const PageLine*>(element.get());
+      auto* line = static_cast<PageLine*>(element.get());
       const auto* block = line->getBlock();
       if (block == nullptr || !block->valid()) {
         continue;
@@ -298,7 +298,7 @@ void HighlightSelectActivity::drawPlacedLines() const {
     return;
   }
   for (uint16_t i = 0; i < placedCount; ++i) {
-    const PageLine* line = placedLines[i].line;
+    PageLine* line = placedLines[i].line;
     if (line == nullptr) {
       continue;
     }

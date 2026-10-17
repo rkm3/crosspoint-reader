@@ -42,7 +42,9 @@ class HighlightSelectActivity final : public Activity {
   };
 
   struct PlacedLine {
-    const PageLine* line = nullptr;
+    // PageLine::render is not const. The page that owns the line stays alive
+    // for the whole activity.
+    PageLine* line = nullptr;
     int16_t y = 0;
     int pageIndex = -1;
   };
