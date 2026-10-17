@@ -56,7 +56,6 @@ class HighlightSelectActivity final : public Activity {
   bool holdPage(int index);
   Page* heldPage(int index) const;
   void releasePagesOutside(int firstPage, int lastPage);
-  uint16_t countTextLines(const Page& page) const;
   void drawPlacedLines() const;
   void nudge(int direction);
   void extractWords();

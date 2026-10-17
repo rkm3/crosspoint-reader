@@ -30,6 +30,25 @@ constexpr unsigned long POPUP_MS = 900;
 constexpr unsigned long REPEAT_START_MS = 500;
 constexpr unsigned long REPEAT_INTERVAL_MS = 500;
 
+uint16_t countTextLines(const Page& page) {
+  uint16_t count = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) {
+      continue;
+    }
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto* block = line->getBlock();
+    if (block == nullptr || !block->valid()) {
+      continue;
+    }
+    if (count == UINT16_MAX) {
+      break;
+    }
+    ++count;
+  }
+  return count;
+}
+
 }  // namespace
 
 HighlightSelectActivity::HighlightSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -108,31 +127,12 @@ void HighlightSelectActivity::releasePagesOutside(const int firstPage, const int
   heldCount = write;
 }
 
-uint16_t HighlightSelectActivity::countTextLines(const Page& page) const {
-  uint16_t count = 0;
-  for (const auto& element : page.elements) {
-    if (element->getTag() != TAG_PageLine) {
-      continue;
-    }
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto* block = line->getBlock();
-    if (block == nullptr || !block->valid()) {
-      continue;
-    }
-    if (count == UINT16_MAX) {
-      break;
-    }
-    ++count;
-  }
-  return count;
-}
-
 bool HighlightSelectActivity::rebuildWindow() {
   // loadPage reads a page; it does not change section->currentPage.
   if (section == nullptr || !holdPage(pageIndex)) {
     return false;
   }
-  Page* origin = heldPage(pageIndex);
+  const Page* origin = heldPage(pageIndex);
   if (origin == nullptr) {
     return false;
   }
@@ -194,7 +194,7 @@ bool HighlightSelectActivity::rebuildWindow() {
   uint16_t cursor = 0;
   anchorLine = 0;
   for (int i = 0; i < orderCount; ++i) {
-    Page* page = heldPage(order[i]);
+    const Page* page = heldPage(order[i]);
     if (page == nullptr) {
       continue;
     }
@@ -219,7 +219,7 @@ bool HighlightSelectActivity::rebuildWindow() {
   placedCount = 0;
   int topY = 0;
   for (int s = 0; s < spanCount; ++s) {
-    Page* page = heldPage(spans[s].index);
+    const Page* page = heldPage(spans[s].index);
     if (page == nullptr) {
       continue;
     }
@@ -291,7 +291,7 @@ void HighlightSelectActivity::nudge(const int direction) {
 
 void HighlightSelectActivity::drawPlacedLines() const {
   if (shift == 0) {
-    Page* origin = heldPage(pageIndex);
+    const Page* origin = heldPage(pageIndex);
     if (origin != nullptr) {
       origin->render(renderer, fontId, marginLeft, marginTop);
     }
