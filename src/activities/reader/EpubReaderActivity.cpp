@@ -2068,7 +2068,7 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
     }
     const int8_t tracking = block->getBlockStyle().characterSpacing;
     const int rubyShift = block->getRubyShift(ascender);
-    const uint16_t line = lineId++;
+    const uint16_t lineIndex = lineId++;
     for (uint16_t i = 0; i < block->wordCount() && filled < wordCount; ++i) {
       const char* text = block->wordText(i);
       if (!isSelectableToken(text)) {
@@ -2088,7 +2088,7 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
       spans[filled].top = static_cast<int16_t>(wordY);
       spans[filled].width = static_cast<int16_t>(advance > 0 ? advance : 0);
       spans[filled].underlineY = static_cast<int16_t>(wordY + ascender + 2);
-      spans[filled].line = line;
+      spans[filled].line = lineIndex;
       ++filled;
     }
   }
