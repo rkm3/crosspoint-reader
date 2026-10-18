@@ -70,8 +70,9 @@ class EpubReaderActivity final : public ReaderActivity {
   uint8_t readwiseEndActionCount = 0;
   // Saved-quote marks on this article. Built once per page paint. The
   // grayscale pass redraws the shade from these runs and does not re-read
-  // the quote file. Pending and rejected quotes are the dark style; a quote
-  // Readwise has accepted is the light style.
+  // the quote file. Pending and rejected quotes have a light gray glyph band
+  // and a 3px underline. A quote Readwise has accepted has a 1px underline
+  // and no shade.
   struct HighlightSegment {
     int16_t x = 0;
     int16_t top = 0;

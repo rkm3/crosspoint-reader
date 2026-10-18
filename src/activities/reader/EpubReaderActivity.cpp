@@ -2089,6 +2089,8 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
       spans[filled].width = static_cast<int16_t>(advance > 0 ? advance : 0);
       spans[filled].underlineY = static_cast<int16_t>(wordY + ascender + 2);
       spans[filled].line = lineIndex;
+      const bool halfSize = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
+      spans[filled].height = static_cast<int16_t>(readwise::highlightShadeBandHeight(ascender, halfSize));
       ++filled;
     }
   }
@@ -2122,11 +2124,6 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
 
   for (uint16_t i = 0; i < filled; ++i) {
     spans[i].mark = marks[i];
-    const int thickness = marks[i] == static_cast<uint8_t>(readwise::HighlightMark::Posted)
-                              ? readwise::HIGHLIGHT_LIGHT_UNDERLINE_PX
-                              : readwise::HIGHLIGHT_DARK_UNDERLINE_PX;
-    const int bottom = spans[i].underlineY + thickness;
-    spans[i].height = static_cast<int16_t>(bottom > spans[i].top ? bottom - spans[i].top : 0);
   }
 
   auto runs = makeUniqueNoThrow<readwise::HighlightRun[]>(HIGHLIGHT_SEGMENT_MAX);
@@ -2148,11 +2145,12 @@ void EpubReaderActivity::ensureHighlightMarks(const Page& page, const int fontId
 void EpubReaderActivity::drawHighlightShades() const {
   for (uint8_t i = 0; i < highlightSegmentCount; ++i) {
     const HighlightSegment& seg = highlightSegments[i];
-    if (seg.width <= 0 || seg.height <= 0 || seg.mark == static_cast<uint8_t>(readwise::HighlightMark::None)) {
+    // Posted quotes are underline only. Pending and rejected share the light
+    // gray, dithered the same way when this pass has no gray plane.
+    if (seg.width <= 0 || seg.height <= 0 || seg.mark != static_cast<uint8_t>(readwise::HighlightMark::Pending)) {
       continue;
     }
-    const bool dark = seg.mark != static_cast<uint8_t>(readwise::HighlightMark::Posted);
-    renderer.shadeHighlightRect(seg.x, seg.top, seg.width, seg.height, dark);
+    renderer.shadeHighlightRect(seg.x, seg.top, seg.width, seg.height, /*dark=*/false);
   }
 }
 

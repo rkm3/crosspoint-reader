@@ -96,14 +96,29 @@ struct HighlightWordView {
 
 enum class HighlightMark : uint8_t { None = 0, Pending = 1, Posted = 2 };
 
-// Pending and rejected quotes are the dark style (the reader rarely revisits
-// an article after sync). Posted quotes are the light style.
-//   dark:  3px solid underline, dark gray shade
-//   light: 1px solid underline, light gray shade
+// Pending and rejected quotes keep the thick underline. The shade behind them
+// is the light gray (the same weight a synced quote used to use). A synced
+// quote has the thin underline and no shade.
+//   pending: 3px solid underline, light gray shade on the glyph band
+//   posted:  1px solid underline, no shade
 // The shade is painted on the grayscale pass. A path without a gray plane
-// dithers the same two weights instead.
+// dithers that same light weight.
 inline constexpr int HIGHLIGHT_DARK_UNDERLINE_PX = 3;
 inline constexpr int HIGHLIGHT_LIGHT_UNDERLINE_PX = 1;
+
+// Height of the pending shade. `ascender` is the distance from the glyph top
+// to the baseline. The band stops at the baseline, so the descent and the
+// gap to the next line stay unshaded. A super/subscript glyph is half size.
+inline int highlightShadeBandHeight(const int ascender, const bool halfSize) {
+  if (ascender <= 0) {
+    return 0;
+  }
+  if (!halfSize) {
+    return ascender;
+  }
+  const int half = ascender / 2;
+  return half > 0 ? half : 1;
+}
 
 // In highlight mode, before a selection starts, each side-button press moves
 // the visible lines by this many. Presses accumulate, up to one page.
