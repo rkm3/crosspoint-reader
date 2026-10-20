@@ -638,8 +638,8 @@ Before a selection starts, **Side Up** and **Side Down** shift the text by three
 
 Saved quotes are drawn on the page:
 
-* **Not yet synced, or rejected by Readwise:** dark gray shade and a 3-pixel solid underline.
-* **Accepted by Readwise:** light gray shade and a 1-pixel solid underline.
+* **Not yet synced, or rejected by Readwise:** light gray shade behind the letters and a 3-pixel solid underline. The shade covers the letters only, so a gap of the page stays visible between lines.
+* **Accepted by Readwise:** a 1-pixel solid underline and no shade.
 
 Words on the same line are one continuous mark, including the space between them. A quote that started on the previous page or continues onto the next is marked on the part that is visible.
 

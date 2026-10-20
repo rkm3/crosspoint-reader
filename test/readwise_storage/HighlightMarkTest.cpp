@@ -127,6 +127,15 @@ HighlightWordMark markedWord(const int16_t x, const int16_t width, const uint16_
   return word;
 }
 
+TEST(HighlightShade, BandCoversTheGlyphAndNotTheLinePitch) {
+  // A 16px ascender used to be shaded through the underline (ascender + 2 + 3).
+  EXPECT_EQ(highlightShadeBandHeight(16, false), 16);
+  EXPECT_LT(highlightShadeBandHeight(16, false), 16 + 2 + HIGHLIGHT_DARK_UNDERLINE_PX);
+  EXPECT_EQ(highlightShadeBandHeight(16, true), 8);
+  EXPECT_EQ(highlightShadeBandHeight(0, false), 0);
+  EXPECT_EQ(highlightShadeBandHeight(-4, true), 0);
+}
+
 TEST(HighlightRun, AdjacentWordsOnOneLineBecomeOneRun) {
   const HighlightWordMark words[] = {
       markedWord(10, 20, 0, HighlightMark::Pending), markedWord(40, 15, 0, HighlightMark::Pending),
